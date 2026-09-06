@@ -5,9 +5,8 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || API_KEY;
+const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || process.env.API_KEY;
 const MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 
 app.use(express.json({ limit: "256kb" }));
@@ -16,6 +15,7 @@ app.use(express.static(path.join(__dirname, "..", "web")));
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 const sessions = new Map();
 const commandQueue = [];
+const rateLimit = new Map();
 
 const SYSTEM = `You are Roblox Builder AI. Help users create and debug Roblox games with Luau.
 When a requested change should happen inside Roblox Studio, emit a command block using exactly:
@@ -28,8 +28,14 @@ delete_instance: {action,path}
 Paths use / separators, e.g. ServerScriptService/MyScript. Vector3 values use [x,y,z]. Color3 values use [r,g,b] from 0 to 1.
 Do not include secrets. Explain what you changed outside the command block.`;
 
-function requireApiKey(req, res, next) {
-  if (!API_KEY || req.get("x-api-key") !== API_KEY) return res.status(401).json({ error: "Unauthorized" });
+function rateLimitChat(req, res, next) {
+  const ip = req.ip || req.headers["x-forwarded-for"] || "unknown";
+  const now = Date.now();
+  const bucket = rateLimit.get(ip) || { count: 0, reset: now + 60000 };
+  if (now > bucket.reset) { bucket.count = 0; bucket.reset = now + 60000; }
+  bucket.count++;
+  rateLimit.set(ip, bucket);
+  if (bucket.count > 30) return res.status(429).json({ error: "Terlalu banyak request. Cuba lagi kemudian." });
   next();
 }
 
@@ -41,7 +47,7 @@ function requireBridge(req, res, next) {
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "..", "web", "index.html")));
 app.get("/health", (_req, res) => res.json({ status: "ok", openai: !!openai, queuedCommands: commandQueue.length }));
 
-app.post("/chat", requireApiKey, async (req, res) => {
+app.post("/chat", rateLimitChat, async (req, res) => {
   try {
     const message = typeof req.body.message === "string" ? req.body.message.trim() : "";
     const sessionId = typeof req.body.sessionId === "string" && req.body.sessionId ? req.body.sessionId : crypto.randomUUID();
@@ -72,13 +78,7 @@ app.post("/chat", requireApiKey, async (req, res) => {
   }
 });
 
-app.get("/bridge/poll", requireBridge, (_req, res) => {
-  res.json({ commands: commandQueue.splice(0, 25) });
-});
-
-app.post("/bridge/result", requireBridge, (req, res) => {
-  console.log("Studio result:", req.body);
-  res.json({ ok: true });
-});
+app.get("/bridge/poll", requireBridge, (_req, res) => res.json({ commands: commandQueue.splice(0, 25) }));
+app.post("/bridge/result", requireBridge, (req, res) => { console.log("Studio result:", req.body); res.json({ ok: true }); });
 
 app.listen(PORT, "0.0.0.0", () => console.log(`Roblox ChatGPT server listening on ${PORT}`));
