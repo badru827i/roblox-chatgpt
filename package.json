@@ -1,17 +1,17 @@
 {
   "name": "roblox-chatgpt-server",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "main": "server/server.js",
   "scripts": {
     "start": "node server/server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "express": "^4.21.2",
     "openai": "^5.12.2",
-    "@google/genai": "^1.12.0"
+    "@google/genai": "^2.21.0"
   }
 }
