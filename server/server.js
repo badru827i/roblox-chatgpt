@@ -1,18 +1,21 @@
 const express = require("express");
 const OpenAI = require("openai");
+const { GoogleGenAI } = require("@google/genai");
 const crypto = require("crypto");
 const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || process.env.API_KEY;
-const MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
 
 app.use(express.json({ limit: "256kb" }));
 app.use(express.static(path.join(__dirname, "..", "web")));
 
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+const gemini = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const sessions = new Map();
 const commandQueue = [];
 const rateLimit = new Map();
@@ -44,8 +47,26 @@ function requireBridge(req, res, next) {
   next();
 }
 
+async function askGemini(history) {
+  const contents = history.slice(-20).map(item => ({
+    role: item.role === "assistant" ? "model" : "user",
+    parts: [{ text: item.content }]
+  }));
+  const result = await gemini.models.generateContent({
+    model: MODEL,
+    contents,
+    config: { systemInstruction: SYSTEM }
+  });
+  return result.text || "Tiada jawapan.";
+}
+
+async function askOpenAI(history) {
+  const response = await openai.responses.create({ model: process.env.OPENAI_MODEL || "gpt-5-mini", instructions: SYSTEM, input: history.slice(-20) });
+  return response.output_text || "Tiada jawapan.";
+}
+
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "..", "web", "index.html")));
-app.get("/health", (_req, res) => res.json({ status: "ok", openai: !!openai, queuedCommands: commandQueue.length }));
+app.get("/health", (_req, res) => res.json({ status: "ok", provider: gemini ? "gemini" : openai ? "openai" : "none", queuedCommands: commandQueue.length }));
 
 app.post("/chat", rateLimitChat, async (req, res) => {
   try {
@@ -53,12 +74,15 @@ app.post("/chat", rateLimitChat, async (req, res) => {
     const sessionId = typeof req.body.sessionId === "string" && req.body.sessionId ? req.body.sessionId : crypto.randomUUID();
     if (!message) return res.status(400).json({ error: "Message diperlukan" });
     if (message.length > 12000) return res.status(413).json({ error: "Message terlalu panjang" });
-    if (!openai) return res.status(503).json({ error: "OPENAI_API_KEY belum dikonfigurasi" });
+    if (!gemini && !openai) return res.status(503).json({ error: "GEMINI_API_KEY belum dikonfigurasi" });
 
     const history = sessions.get(sessionId) || [];
     history.push({ role: "user", content: message });
-    const response = await openai.responses.create({ model: MODEL, instructions: SYSTEM, input: history.slice(-20) });
-    const reply = response.output_text || "Tiada jawapan.";
+
+    let reply;
+    if (gemini) reply = await askGemini(history);
+    else reply = await askOpenAI(history);
+
     history.push({ role: "assistant", content: reply });
     sessions.set(sessionId, history.slice(-20));
 
@@ -71,7 +95,7 @@ app.post("/chat", rateLimitChat, async (req, res) => {
         queued++;
       }
     }
-    res.json({ sessionId, reply, queued });
+    res.json({ sessionId, reply, queued, provider: gemini ? "gemini" : "openai" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error.message || "Server error" });
