@@ -2,14 +2,16 @@
 <html lang="ms">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Roblox ChatGPT Builder</title>
+<title>Roblox AI Builder</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
-*{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:#0b1020;color:#f4f7ff;height:100vh;display:flex;flex-direction:column}header{padding:14px 18px;border-bottom:1px solid #252d45;display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:18px;margin:0}.tools{display:flex;gap:8px;align-items:center}button,textarea{font:inherit}button{border:0;border-radius:8px;padding:9px 13px;cursor:pointer}#clear{background:#25304b;color:#fff}.wrap{flex:1;min-height:0;display:flex;flex-direction:column;max-width:1100px;width:100%;margin:auto}.chat{flex:1;overflow:auto;padding:24px}.msg{max-width:850px;padding:12px 15px;border-radius:14px;margin:0 0 12px;white-space:pre-wrap;line-height:1.45}.assistant{background:#151d32;border:1px solid #26304b}.user{background:#304a79;margin-left:auto}.composer{padding:15px;border-top:1px solid #252d45;display:flex;gap:10px}#input{flex:1;resize:none;height:56px;background:#11182b;border:1px solid #34405f;color:#fff;border-radius:10px;padding:12px}#send{background:#6c7cff;color:white;font-weight:700}#status{font-size:12px;color:#99a8c8;padding:0 15px 8px}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:#0b1020;color:#f4f7ff;height:100vh;display:flex;flex-direction:column}header{padding:12px 18px;border-bottom:1px solid #252d45;display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:18px;margin:0}.userbox{display:flex;align-items:center;gap:10px}.userbox img{width:32px;height:32px;border-radius:50%}.userbox button{background:#25304b;color:#fff}.login{padding:24px;text-align:center}.wrap{flex:1;min-height:0;display:none;flex-direction:column;max-width:1100px;width:100%;margin:auto}.chat{flex:1;overflow:auto;padding:24px}.msg{max-width:850px;padding:12px 15px;border-radius:14px;margin:0 0 12px;white-space:pre-wrap;line-height:1.45}.assistant{background:#151d32;border:1px solid #26304b}.user{background:#304a79;margin-left:auto}.image{max-width:320px;max-height:240px;display:block;border-radius:10px;margin-bottom:8px}.composer{padding:15px;border-top:1px solid #252d45;display:flex;gap:10px}.inputwrap{flex:1;display:flex;flex-direction:column;gap:8px}#input{flex:1;resize:none;height:56px;background:#11182b;border:1px solid #34405f;color:#fff;border-radius:10px;padding:12px}button{font:inherit;border:0;border-radius:8px;padding:9px 13px;cursor:pointer}#send{background:#6c7cff;color:white;font-weight:700}#status{font-size:12px;color:#99a8c8;padding:0 15px 8px}#preview{display:none;align-items:center;gap:8px;background:#11182b;border:1px solid #34405f;border-radius:8px;padding:8px}#preview img{width:70px;height:55px;object-fit:cover;border-radius:6px}#removeImage{background:#25304b;color:#fff}.login-card{margin:80px auto;max-width:430px;padding:28px;background:#11182b;border:1px solid #2d3856;border-radius:16px}.login-card p{color:#aab6d3}
 </style></head>
 <body>
-<header><h1>🤖 Roblox ChatGPT Builder</h1><div class="tools"><button id="clear">Clear</button></div></header>
-<div class="wrap"><div id="chat" class="chat"><div class="msg assistant">Hi! Saya dah bersedia. Taip apa yang anda mahu saya buat atau baiki dalam Roblox Studio.</div></div>
-<div id="status">Menyambung...</div>
-<form id="form" class="composer"><textarea id="input" placeholder="Contoh: Buat sistem profile player dengan LikeButton..."></textarea><button id="send" type="submit">Hantar</button></form></div>
-<script src="/app.js?v=4"></script>
+<header><h1>🤖 Roblox AI Builder</h1><div id="userbox" class="userbox"></div></header>
+<div id="login" class="login"><div class="login-card"><h2>Login untuk mula</h2><p>Login dengan Google. Anda boleh pilih akaun Google lain melalui pemilih akaun Google.</p><div id="googleButton"></div></div></div>
+<div id="wrap" class="wrap"><div id="chat" class="chat"><div class="msg assistant">Hi! Saya dah bersedia. Taip arahan untuk Roblox Studio. Anda juga boleh <b>copy gambar dan tekan Ctrl+V</b> di kotak chat.</div></div>
+<div id="status">Online</div>
+<form id="form" class="composer"><div class="inputwrap"><div id="preview"><img id="previewImg"><span id="previewName">Gambar siap dihantar</span><button id="removeImage" type="button">Buang</button></div><textarea id="input" placeholder="Contoh: Buat sistem profile player dengan LikeButton..."></textarea></div><button id="send" type="submit">Hantar</button></form></div>
+<script src="/app.js?v=5"></script>
 </body></html>
