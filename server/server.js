@@ -4,6 +4,15 @@ const { GoogleGenAI } = require("@google/genai");
 const { OAuth2Client } = require("google-auth-library");
 const crypto = require("crypto");
 const path = require("path");
+const {
+  initDb,
+  upsertUser,
+  createSession,
+  getUserBySession,
+  deleteSession,
+  cleanupExpiredSessions,
+  isEnabled: isDbEnabled
+} = require("./db");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -53,12 +62,27 @@ function clearSessionCookie(res) {
   res.setHeader("Set-Cookie", "rbx_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
 }
 
-function requireLogin(req, res, next) {
-  const sessionId = getCookie(req, "rbx_session");
-  if (!sessionId || !sessions.has(sessionId)) return res.status(401).json({ error: "Sila login dengan Google dahulu." });
-  req.userSession = sessions.get(sessionId);
-  req.sessionId = sessionId;
-  next();
+async function requireLogin(req, res, next) {
+  try {
+    const sessionId = getCookie(req, "rbx_session");
+    if (!sessionId) return res.status(401).json({ error: "Sila login dengan Google dahulu." });
+
+    if (isDbEnabled()) {
+      const user = await getUserBySession(sessionId);
+      if (!user) return res.status(401).json({ error: "Session tamat. Sila login semula." });
+      req.userSession = { user, history: sessions.get(sessionId)?.history || [] };
+    } else {
+      const session = sessions.get(sessionId);
+      if (!session) return res.status(401).json({ error: "Sila login dengan Google dahulu." });
+      req.userSession = session;
+    }
+
+    req.sessionId = sessionId;
+    next();
+  } catch (error) {
+    console.error("Auth lookup error:", error);
+    res.status(500).json({ error: "Database authentication error." });
+  }
 }
 
 function requireBridge(req, res, next) {
@@ -67,7 +91,7 @@ function requireBridge(req, res, next) {
 }
 
 function rateLimitChat(req, res, next) {
-  const key = req.sessionId || req.ip || "unknown";
+  const key = req.userSession?.user?.id || req.ip || "unknown";
   const now = Date.now();
   const bucket = rateLimit.get(key) || { count: 0, reset: now + 60000 };
   if (now > bucket.reset) { bucket.count = 0; bucket.reset = now + 60000; }
@@ -88,9 +112,8 @@ async function askGemini(history, image) {
       const header = image.slice(0, comma);
       const data = image.slice(comma + 1);
       const mimeMatch = header.match(/^data:([^;]+);base64$/);
-      if (mimeMatch && data.length < 10_000_000) {
-        const last = contents[contents.length - 1];
-        last.parts.push({ inlineData: { mimeType: mimeMatch[1], data } });
+      if (mimeMatch && data.length < 10_000_000 && contents.length) {
+        contents[contents.length - 1].parts.push({ inlineData: { mimeType: mimeMatch[1], data } });
       }
     }
   }
@@ -108,12 +131,23 @@ async function askOpenAI(history) {
 }
 
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "..", "web", "index.html")));
-app.get("/auth/config", (_req, res) => res.json({ clientId: GOOGLE_CLIENT_ID || null }));
-app.get("/me", (req, res) => {
-  const sessionId = getCookie(req, "rbx_session");
-  const session = sessionId ? sessions.get(sessionId) : null;
-  if (!session) return res.status(401).json({ authenticated: false });
-  res.json({ authenticated: true, user: session.user });
+app.get("/auth/config", (_req, res) => res.json({ clientId: GOOGLE_CLIENT_ID || null, database: isDbEnabled() }));
+
+app.get("/me", async (req, res) => {
+  try {
+    const sessionId = getCookie(req, "rbx_session");
+    if (!sessionId) return res.status(401).json({ authenticated: false });
+
+    let user = null;
+    if (isDbEnabled()) user = await getUserBySession(sessionId);
+    else user = sessions.get(sessionId)?.user || null;
+
+    if (!user) return res.status(401).json({ authenticated: false });
+    res.json({ authenticated: true, user, database: isDbEnabled() });
+  } catch (error) {
+    console.error("/me error:", error);
+    res.status(500).json({ authenticated: false, error: "Database error." });
+  }
 });
 
 app.post("/auth/google", async (req, res) => {
@@ -121,48 +155,70 @@ app.post("/auth/google", async (req, res) => {
     if (!googleClient) return res.status(503).json({ error: "GOOGLE_CLIENT_ID belum dikonfigurasi di Railway." });
     const credential = typeof req.body.credential === "string" ? req.body.credential : "";
     if (!credential) return res.status(400).json({ error: "Google credential diperlukan." });
+
     const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
     const payload = ticket.getPayload();
     if (!payload || !payload.sub || !payload.email) return res.status(401).json({ error: "Google account tidak sah." });
 
+    const baseUser = {
+      id: payload.sub,
+      email: payload.email,
+      name: payload.name || payload.email,
+      picture: payload.picture || null
+    };
+
+    const user = await upsertUser(baseUser);
     const sessionId = crypto.randomUUID();
-    sessions.set(sessionId, {
-      user: {
-        id: payload.sub,
-        email: payload.email,
-        name: payload.name || payload.email,
-        picture: payload.picture || null
-      },
-      createdAt: Date.now()
-    });
+
+    if (isDbEnabled()) {
+      await createSession(sessionId, user.id);
+    }
+
+    // History chat kekal ringkas dan hanya di memory; data profil/session disimpan dalam Postgres.
+    sessions.set(sessionId, { user, history: [], createdAt: Date.now() });
     setSessionCookie(res, sessionId);
-    res.json({ ok: true, user: sessions.get(sessionId).user });
+    res.json({ ok: true, user, database: isDbEnabled() });
   } catch (error) {
     console.error("Google login error:", error);
     res.status(401).json({ error: "Google login gagal." });
   }
 });
 
-app.post("/auth/logout", (req, res) => {
-  const sessionId = getCookie(req, "rbx_session");
-  if (sessionId) sessions.delete(sessionId);
-  clearSessionCookie(res);
-  res.json({ ok: true });
+app.post("/auth/logout", async (req, res) => {
+  try {
+    const sessionId = getCookie(req, "rbx_session");
+    if (sessionId) {
+      await deleteSession(sessionId);
+      sessions.delete(sessionId);
+    }
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Logout error:", error);
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  }
 });
 
-app.get("/health", (_req, res) => res.json({ status: "ok", provider: gemini ? "gemini" : openai ? "openai" : "none", googleLogin: !!googleClient, queuedCommands: commandQueue.length }));
+app.get("/health", (_req, res) => res.json({
+  status: "ok",
+  provider: gemini ? "gemini" : openai ? "openai" : "none",
+  googleLogin: !!googleClient,
+  database: isDbEnabled(),
+  queuedCommands: commandQueue.length
+}));
 
 app.post("/chat", requireLogin, rateLimitChat, async (req, res) => {
   try {
     const message = typeof req.body.message === "string" ? req.body.message.trim() : "";
     const imageDataUrl = typeof req.body.imageDataUrl === "string" ? req.body.imageDataUrl : null;
-    const sessionId = req.sessionId;
     if (!message && !imageDataUrl) return res.status(400).json({ error: "Mesej atau gambar diperlukan." });
     if (message.length > 12000) return res.status(413).json({ error: "Message terlalu panjang." });
     if (imageDataUrl && imageDataUrl.length > 10_000_000) return res.status(413).json({ error: "Gambar terlalu besar." });
     if (!gemini && !openai) return res.status(503).json({ error: "Tiada AI provider dikonfigurasi." });
 
-    const history = sessions.get(sessionId).history || [];
+    const session = sessions.get(req.sessionId) || { history: [] };
+    const history = session.history;
     history.push({ role: "user", content: message || "[Gambar dihantar]" });
 
     let reply;
@@ -170,7 +226,12 @@ app.post("/chat", requireLogin, rateLimitChat, async (req, res) => {
     else reply = await askOpenAI(history);
 
     history.push({ role: "assistant", content: reply });
-    sessions.get(sessionId).history = history.slice(-20);
+    sessions.set(req.sessionId, {
+      ...session,
+      user: req.userSession.user,
+      history: history.slice(-20),
+      createdAt: session.createdAt || Date.now()
+    });
 
     const match = reply.match(/<ROBLOX_COMMANDS>([\s\S]*?)<\/ROBLOX_COMMANDS>/);
     let queued = 0;
@@ -181,7 +242,7 @@ app.post("/chat", requireLogin, rateLimitChat, async (req, res) => {
         queued++;
       }
     }
-    res.json({ sessionId, reply, queued, provider: gemini ? "gemini" : "openai" });
+    res.json({ sessionId: req.sessionId, reply, queued, provider: gemini ? "gemini" : "openai" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error.message || "Server error" });
@@ -191,4 +252,18 @@ app.post("/chat", requireLogin, rateLimitChat, async (req, res) => {
 app.get("/bridge/poll", requireBridge, (_req, res) => res.json({ commands: commandQueue.splice(0, 25) }));
 app.post("/bridge/result", requireBridge, (req, res) => { console.log("Studio result:", req.body); res.json({ ok: true }); });
 
-app.listen(PORT, "0.0.0.0", () => console.log(`Roblox ChatGPT server listening on ${PORT}`));
+async function start() {
+  try {
+    await initDb();
+    console.log(`PostgreSQL: ${isDbEnabled() ? "enabled" : "disabled"}`);
+    if (isDbEnabled()) {
+      setInterval(() => cleanupExpiredSessions().catch(err => console.error("Session cleanup error:", err)), 60 * 60 * 1000);
+    }
+    app.listen(PORT, "0.0.0.0", () => console.log(`Roblox ChatGPT server listening on ${PORT}`));
+  } catch (error) {
+    console.error("Database initialization failed:", error);
+    process.exit(1);
+  }
+}
+
+start();
