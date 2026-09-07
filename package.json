@@ -1,6 +1,6 @@
 {
   "name": "roblox-chatgpt-server",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "main": "server/server.js",
   "scripts": {
@@ -13,6 +13,7 @@
     "express": "^4.21.2",
     "openai": "^5.12.2",
     "@google/genai": "^2.21.0",
-    "google-auth-library": "^10.3.0"
+    "google-auth-library": "^10.3.0",
+    "pg": "^8.16.3"
   }
 }
