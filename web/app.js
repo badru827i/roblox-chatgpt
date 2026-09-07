@@ -11,7 +11,7 @@ const previewImg = document.getElementById("previewImg");
 const previewName = document.getElementById("previewName");
 const removeImage = document.getElementById("removeImage");
 let pendingImage = null;
-let sessionId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString();
+let sessionId = null;
 
 function add(role, text, imageDataUrl = null) {
   const el = document.createElement("div");
@@ -63,12 +63,13 @@ function waitForGoogle() {
 
 async function setupGoogleLogin() {
   try {
-    const configResponse = await fetch("/auth/config");
+    const configResponse = await fetch("/auth/config", { cache: "no-store" });
     const config = await configResponse.json();
     if (!config.clientId) {
       googleButton.innerHTML = "<span style='color:#ffb4b4'>Tetapkan GOOGLE_CLIENT_ID di Railway.</span>";
       return;
     }
+
     await waitForGoogle();
     google.accounts.id.initialize({
       client_id: config.clientId,
@@ -77,6 +78,7 @@ async function setupGoogleLogin() {
       ux_mode: "popup",
       use_fedcm_for_button: true
     });
+
     googleButton.innerHTML = "";
     google.accounts.id.renderButton(googleButton, {
       theme: "filled_black",
@@ -98,42 +100,50 @@ async function handleGoogleCredential(response) {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Google login gagal");
-    showLoggedIn(data.user);
+    sessionId = data.sessionId || null;
+    showLoggedIn(data.user, data.database);
   } catch (error) {
     googleButton.innerHTML = `<span style="color:#ffb4b4">${error.message}</span>`;
   }
 }
 
-function showLoggedIn(user) {
+function showLoggedIn(user, database = false) {
   login.style.display = "none";
   wrap.style.display = "flex";
-  status.textContent = `Online • ${user.email}`;
+  status.textContent = database ? `Online • ${user.email} • Data disimpan` : `Online • ${user.email}`;
   userbox.innerHTML = "";
+
   if (user.picture) {
     const img = document.createElement("img");
     img.src = user.picture;
     img.alt = user.name;
     userbox.appendChild(img);
   }
+
   const name = document.createElement("span");
   name.textContent = user.name;
   userbox.appendChild(name);
+
   const logout = document.createElement("button");
   logout.textContent = "Logout / Akaun lain";
   logout.onclick = async () => {
-    await fetch("/auth/logout", { method: "POST" });
-    location.reload();
+    try {
+      await fetch("/auth/logout", { method: "POST" });
+      if (globalThis.google?.accounts?.id) google.accounts.id.disableAutoSelect();
+    } finally {
+      location.reload();
+    }
   };
   userbox.appendChild(logout);
 }
 
 async function checkSession() {
   try {
-    const r = await fetch("/me");
+    const r = await fetch("/me", { cache: "no-store" });
     if (!r.ok) throw new Error("Not logged in");
     const data = await r.json();
-    sessionId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString();
-    showLoggedIn(data.user);
+    sessionId = data.sessionId || null;
+    showLoggedIn(data.user, data.database);
   } catch (_) {
     login.style.display = "block";
     wrap.style.display = "none";
@@ -163,6 +173,7 @@ form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const message = input.value.trim();
   if (!message && !pendingImage) return;
+
   const sentImage = pendingImage;
   input.value = "";
   clearImage();
@@ -185,10 +196,5 @@ form.addEventListener("submit", async (e) => {
     status.textContent = "Error";
   }
 });
-
-document.getElementById("clear").onclick = () => {
-  chat.innerHTML = "";
-  add("assistant", "Chat dibersihkan.");
-};
 
 checkSession();
