@@ -140,8 +140,8 @@ function fetchText(target, redirects = 0) {
 async function webResearch(query) {
   const encoded = encodeURIComponent(String(query || ""));
   const searchHtml = await fetchText("https://html.duckduckgo.com/html/?q=" + encoded);
-  const linkRe = /<a[^>]+class=["']result__a["'][^>]+href=["']([^"']+)["'][^>]*>([\\s\\S]*?)<\\/a>/gi;
-  const snippetRe = /<a[^>]+class=["']result__snippet["'][^>]*>([\\s\\S]*?)<\\/a>/gi;
+  const linkRe = /<a[^>]+class=["']result__a["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRe = /<a[^>]+class=["']result__snippet["'][^>]*>([\s\S]*?)<\/a>/gi;
   const results = [];
   let match;
   while ((match = linkRe.exec(searchHtml)) && results.length < 4) {
