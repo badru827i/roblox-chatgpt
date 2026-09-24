@@ -1,4 +1,6 @@
 const express = require("express");
+const http = require("http");
+const { WebSocketServer } = require("ws");
 const { GoogleGenAI } = require("@google/genai");
 const { OAuth2Client } = require("google-auth-library");
 const crypto = require("crypto");
@@ -24,7 +26,9 @@ app.use(express.json({ limit: "12mb" }));
 app.use(express.static(path.join(__dirname, "..", "web")));
 
 // Mobile AI Fusion routes: persistent chat + web research, used by the Android app.
-require("./mobile-routes")(app);
+const registerMobileRoutes = require("./mobile-routes");
+registerMobileRoutes(app);
+const attachMobileWebSocket = require("./mobile-websocket");
 
 const gemini = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
@@ -301,7 +305,10 @@ async function start() {
     if (isDbEnabled()) {
       setInterval(() => cleanupExpiredSessions().catch(err => console.error("Session cleanup error:", err)), 60 * 60 * 1000);
     }
-    app.listen(PORT, "0.0.0.0", () => console.log(`Roblox ChatGPT server listening on ${PORT}`));
+    const httpServer = http.createServer(app);
+    const mobileWss = new WebSocketServer({ server: httpServer, path: "/ws/mobile" });
+    attachMobileWebSocket(mobileWss);
+    httpServer.listen(PORT, "0.0.0.0", () => console.log(`Roblox ChatGPT server listening on ${PORT} • WebSocket /ws/mobile ready`));
   } catch (error) {
     console.error("Database initialization failed:", error);
     process.exit(1);

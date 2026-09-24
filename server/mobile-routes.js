@@ -7,7 +7,8 @@ const { URL } = require("url");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite").split(",").map(s => s.trim()).filter(Boolean);\nconst GEMINI_RETRIES = 2;
+const MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite").split(",").map(s => s.trim()).filter(Boolean);
+const GEMINI_RETRIES = 2;
 const MAX_MESSAGE = 12000;
 const MAX_HISTORY = 30;
 const rateLimit = new Map();
@@ -382,7 +383,8 @@ module.exports = function registerMobileRoutes(app) {
       });
     } catch (error) {
       console.error("mobile chat:", error);
-      const status = error?.code === "AI_UNAVAILABLE" ? 503 : 500;\n      res.status(status).json({ error: error?.message || "AI server error.", code: error?.code || "AI_SERVER_ERROR", retryable: Boolean(error?.retryable) });
+      const status = error?.code === "AI_UNAVAILABLE" ? 503 : 500;
+      res.status(status).json({ error: error?.message || "AI server error.", code: error?.code || "AI_SERVER_ERROR", retryable: Boolean(error?.retryable) });
     }
   });
 };
