@@ -23,6 +23,9 @@ const MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
 app.use(express.json({ limit: "12mb" }));
 app.use(express.static(path.join(__dirname, "..", "web")));
 
+// Mobile AI Fusion routes: persistent chat + web research, used by the Android app.
+require("./mobile-routes")(app);
+
 const gemini = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 const sessions = new Map();
@@ -119,7 +122,7 @@ async function askGemini(history, imageDataUrl) {
     if (comma > 0 && contents.length) {
       const header = imageDataUrl.slice(0, comma);
       const data = imageDataUrl.slice(comma + 1);
-      const mimeMatch = header.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64$/);
+      const mimeMatch = header.match(/^data:(image/[a-zA-Z0-9.+-]+);base64$/);
       if (!mimeMatch) throw new Error("Format gambar tidak disokong. Gunakan PNG, JPG atau WebP.");
       if (data.length > 10_000_000) throw new Error("Gambar terlalu besar.");
       contents[contents.length - 1].parts.push({
@@ -255,7 +258,7 @@ app.post("/chat", requireLogin, rateLimitChat, async (req, res) => {
       createdAt: session.createdAt || Date.now()
     });
 
-    const match = reply.match(/<ROBLOX_COMMANDS>([\s\S]*?)<\/ROBLOX_COMMANDS>/);
+    const match = reply.match(/<ROBLOX_COMMANDS>([\\s\\S]*?)<\\/ROBLOX_COMMANDS>/);
     let queued = 0;
     if (match) {
       const parsed = JSON.parse(match[1]);
