@@ -122,7 +122,7 @@ async function askGemini(history, imageDataUrl) {
     if (comma > 0 && contents.length) {
       const header = imageDataUrl.slice(0, comma);
       const data = imageDataUrl.slice(comma + 1);
-      const mimeMatch = header.match(/^data:(image/[a-zA-Z0-9.+-]+);base64$/);
+      const mimeMatch = header.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64$/);
       if (!mimeMatch) throw new Error("Format gambar tidak disokong. Gunakan PNG, JPG atau WebP.");
       if (data.length > 10_000_000) throw new Error("Gambar terlalu besar.");
       contents[contents.length - 1].parts.push({
