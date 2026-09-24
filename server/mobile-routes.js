@@ -74,10 +74,14 @@ function safeTitle(text) {
 function needsWeb(message) {
   const q = String(message || "").toLowerCase();
   return [
-    "cari", "carikan", "search", "google", "web", "internet", "terkini",
-    "terbaru", "latest", "today", "hari ini", "sekarang", "harga", "price",
-    "berita", "news", "update", "spesifikasi", "spec", "sumber", "siapa",
-    "berapa", "2026", "malaysia"
+    "cari", "carikan", "search", "google", "web", "internet", "online",
+    "terkini", "terbaru", "latest", "today", "hari ini", "sekarang",
+    "harga", "price", "berita", "news", "update", "spesifikasi", "spec",
+    "sumber", "siapa", "berapa", "bila", "mana", "kenapa", "mengapa",
+    "cara", "tutorial", "review", "perbandingan", "compare", "vs",
+    "lokasi", "alamat", "jadual", "schedule", "cuaca", "weather",
+    "produk", "model", "telefon", "phone", "laptop", "roblox", "malaysia",
+    "2026"
   ].some(term => q.includes(term));
 }
 
@@ -356,7 +360,8 @@ module.exports = function registerMobileRoutes(app) {
       let webSources = [];
       let webContext = "";
 
-      if (needsWeb(message)) {
+      const researchRequested = req.body?.research === true || req.body?.evidenceFirst === true;
+      if (researchRequested || needsWeb(message)) {
         try {
           webSources = await webResearch(message);
           webContext = webSources.map((s, i) =>
