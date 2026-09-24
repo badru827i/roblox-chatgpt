@@ -7,7 +7,7 @@ const { URL } = require("url");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
+const MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite").split(",").map(s => s.trim()).filter(Boolean);\nconst GEMINI_RETRIES = 2;
 const MAX_MESSAGE = 12000;
 const MAX_HISTORY = 30;
 const rateLimit = new Map();
@@ -188,12 +188,30 @@ Do not pretend you accessed private accounts or private user data. Do not invent
 If the user asks for current information and web research is absent, say that current verification is unavailable instead of pretending.
 ${webContext ? "\nWEB RESEARCH (public pages):\\n" + webContext : ""}`;
 
-  const result = await gemini.models.generateContent({
-    model: MODEL,
-    contents,
-    config: { systemInstruction: system }
-  });
-  return result.text || "Tiada jawapan.";
+  let lastError = null;
+  for (const model of MODELS) {
+    for (let attempt = 0; attempt <= GEMINI_RETRIES; attempt++) {
+      try {
+        const result = await gemini.models.generateContent({
+          model,
+          contents,
+          config: { systemInstruction: system }
+        });
+        return result.text || "Tiada jawapan.";
+      } catch (error) {
+        lastError = error;
+        const message = String(error?.message || error || "");
+        const transient = /\b(429|500|502|503|504)\b|UNAVAILABLE|high demand|overloaded|temporar/i.test(message);
+        if (!transient || attempt >= GEMINI_RETRIES) break;
+        await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+      }
+    }
+  }
+  const error = new Error("AI sementara sibuk. Semua model Gemini sedang tidak tersedia. Cuba lagi sebentar.");
+  error.code = "AI_UNAVAILABLE";
+  error.retryable = true;
+  error.cause = lastError;
+  throw error;
 }
 
 function rateLimitMobile(req, res, next) {
@@ -364,7 +382,7 @@ module.exports = function registerMobileRoutes(app) {
       });
     } catch (error) {
       console.error("mobile chat:", error);
-      res.status(500).json({ error: error.message || "AI server error." });
+      const status = error?.code === "AI_UNAVAILABLE" ? 503 : 500;\n      res.status(status).json({ error: error?.message || "AI server error.", code: error?.code || "AI_SERVER_ERROR", retryable: Boolean(error?.retryable) });
     }
   });
 };
