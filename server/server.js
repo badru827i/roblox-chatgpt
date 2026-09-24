@@ -258,7 +258,7 @@ app.post("/chat", requireLogin, rateLimitChat, async (req, res) => {
       createdAt: session.createdAt || Date.now()
     });
 
-    const match = reply.match(/<ROBLOX_COMMANDS>([\\s\\S]*?)<\\/ROBLOX_COMMANDS>/);
+    const match = reply.match(/<ROBLOX_COMMANDS>([\s\S]*?)<\/ROBLOX_COMMANDS>/);
     let queued = 0;
     if (match) {
       const parsed = JSON.parse(match[1]);
