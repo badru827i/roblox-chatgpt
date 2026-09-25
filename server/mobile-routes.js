@@ -355,6 +355,76 @@ module.exports = function registerMobileRoutes(app) {
     }
   });
 
+  const imageChatHandler = async (req, res) => {
+    try {
+      const owner = deviceId(req);
+      if (!owner) return res.status(400).json({ error: "X-Device-Id diperlukan." });
+
+      const message = typeof req.body?.message === "string"
+        ? req.body.message.trim()
+        : "Fahami gambar ini dan terangkan apa yang pengguna mahu tahu.";
+      const mimeType = typeof req.body?.mimeType === "string"
+        ? req.body.mimeType.trim()
+        : "image/jpeg";
+      const imageBase64 = typeof req.body?.imageBase64 === "string"
+        ? req.body.imageBase64.trim()
+        : "";
+
+      if (!imageBase64) return res.status(400).json({ error: "imageBase64 diperlukan." });
+      if (!/^image\/(jpeg|jpg|png|webp|gif)$/i.test(mimeType)) {
+        return res.status(415).json({ error: "Format gambar tidak disokong." });
+      }
+      if (imageBase64.length > 12 * 1024 * 1024) {
+        return res.status(413).json({ error: "Gambar terlalu besar. Maksimum 8 MB." });
+      }
+      if (!gemini) return res.status(503).json({ error: "GEMINI_API_KEY belum dikonfigurasi di Railway." });
+
+      const prompt = `You are AI Fusion Vision Assistant.
+Understand Bahasa Melayu, English, mixed Malay-English and slang.
+Look carefully at the supplied image and answer the user's instruction about it.
+Identify visible objects, UI, code, diagrams, text and relevant details when possible.
+If the user asks how to build or recreate something shown in the image (for example Roblox Studio), give practical step-by-step instructions.
+Do not claim to see details that are not visible.
+User instruction: ${message}`;
+
+      let lastError = null;
+      for (const model of MODELS) {
+        try {
+          const result = await gemini.models.generateContent({
+            model,
+            contents: [{
+              role: "user",
+              parts: [
+                { inlineData: { mimeType, data: imageBase64 } },
+                { text: prompt }
+              ]
+            }],
+            config: {
+              systemInstruction: "You are a multimodal assistant. Analyze images accurately and stay on the user's actual request."
+            }
+          });
+          const reply = String(result?.text || "").trim();
+          if (reply) return res.json({ ok: true, reply, model });
+        } catch (error) {
+          lastError = error;
+          const msg = String(error?.message || error || "");
+          const transient = /\\b(429|500|502|503|504)\\b|UNAVAILABLE|overloaded|temporar/i.test(msg);
+          if (!transient) break;
+        }
+      }
+      throw lastError || new Error("Model vision tidak menghasilkan jawapan.");
+    } catch (error) {
+      console.error("mobile image chat:", error);
+      res.status(500).json({ error: error?.message || "Image understanding gagal." });
+    }
+  };
+
+  // Multimodal image understanding endpoint + aliases for older APKs/proxies.
+  app.post("/mobile/chat/image", rateLimitMobile, imageChatHandler);
+  app.post("/mobile/chat/image/", rateLimitMobile, imageChatHandler);
+  app.post("/api/mobile/chat/image", rateLimitMobile, imageChatHandler);
+  app.post("/chat/image", rateLimitMobile, imageChatHandler);
+
   const generateImageHandler = async (req, res) => {
     try {
       const owner = deviceId(req);
@@ -410,6 +480,7 @@ module.exports = function registerMobileRoutes(app) {
   app.post("/mobile/generate-image/", rateLimitMobile, generateImageHandler);
   app.post("/api/mobile/generate-image", rateLimitMobile, generateImageHandler);
   app.post("/generate-image", rateLimitMobile, generateImageHandler);
+  app.post("/mobile/ai-gene", rateLimitMobile, generateImageHandler);
 
   app.post("/mobile/chat/stream", rateLimitMobile, async (req, res) => {
     let streamStarted = false;
