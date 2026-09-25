@@ -147,8 +147,26 @@ function allowRequest(deviceId) {
 }
 
 module.exports = function attachMobileWebSocket(wss) {
+  // Keep long-lived Android/OkHttp connections alive through Railway's proxy.
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (ws.isAlive === false) {
+        try { ws.terminate(); } catch (_) {}
+        continue;
+      }
+      ws.isAlive = false;
+      try { ws.ping(); } catch (_) {}
+    }
+  }, 25000);
+
+  wss.on("close", () => clearInterval(heartbeat));
+
   wss.on("connection", (ws, request) => {
+    ws.isAlive = true;
+    ws.on("pong", () => { ws.isAlive = true; });
+    ws.on("error", error => console.error("Mobile WebSocket error:", error?.message || error));
     const deviceId = getDeviceId(request);
+    console.log("Mobile WebSocket connected:", deviceId || "invalid-device");
     if (!deviceId) {
       ws.close(1008, "X-Device-Id diperlukan.");
       return;
@@ -160,6 +178,8 @@ module.exports = function attachMobileWebSocket(wss) {
       percent: 1,
       message: "WebSocket connected"
     }));
+
+    ws.on("close", () => console.log("Mobile WebSocket closed:", deviceId));
 
     ws.on("message", async raw => {
       let body;
