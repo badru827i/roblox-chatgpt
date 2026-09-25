@@ -74,7 +74,6 @@ function safeTitle(text) {
 function needsWeb(message) {
   const q = String(message || "").toLowerCase().trim();
   if (!q) return false;
-  // Web/Google is for explicit search or freshness-sensitive requests.
   const explicit = [
     "cari", "carikan", "search", "google", "web", "internet", "online",
     "terkini", "terbaru", "latest", "today", "hari ini", "sekarang",
@@ -84,9 +83,19 @@ function needsWeb(message) {
     "cuaca", "weather", "lokasi", "alamat", "2026"
   ];
   if (explicit.some(term => q.includes(term))) return true;
-  // Explicit comparison/current-product queries can benefit from live sources.
-  return /\\b(vs|versus|bandingkan|perbandingan|compare)\\b/.test(q) &&
-         /\\b(harga|spec|spesifikasi|telefon|phone|laptop|produk|model)\\b/.test(q);
+  return /\b(vs|versus|bandingkan|perbandingan|compare)\b/.test(q) &&
+         /\b(harga|spec|spesifikasi|telefon|phone|laptop|produk|model)\b/.test(q);
+}
+
+function buildSearchQueries(message) {
+  const original = String(message || "").replace(/\s+/g, " ").trim();
+  const q = original.toLowerCase();
+  const queries = [original];
+  if (/\b(harga|price|berapa)\b/.test(q)) queries.push(original + " Malaysia current price");
+  if (/\b(spec|spesifikasi|model|telefon|phone|laptop|gpu|cpu)\b/.test(q)) queries.push(original + " official specifications");
+  if (/\b(latest|terkini|terbaru|sekarang|hari ini|2026)\b/.test(q)) queries.push(original + " latest 2026");
+  if (/\b(cara|macam mana|how|tutorial|fix|baiki)\b/.test(q)) queries.push(original + " official documentation guide");
+  return [...new Set(queries)].slice(0, 4);
 }
 
 function htmlDecode(value) {
@@ -147,13 +156,22 @@ function fetchText(target, redirects = 0) {
 }
 
 async function webResearch(query) {
-  const encoded = encodeURIComponent(String(query || ""));
-  const searchHtml = await fetchText("https://html.duckduckgo.com/html/?q=" + encoded);
+  const queries = buildSearchQueries(query);
+  const batches = await Promise.all(queries.map(async currentQuery => {
+    try {
+      const encoded = encodeURIComponent(currentQuery);
+      return await fetchText("https://html.duckduckgo.com/html/?q=" + encoded);
+    } catch (_) {
+      return "";
+    }
+  }));
+  const searchHtml = batches.join("\n");
   const linkRe = /<a[^>]+class=["']result__a["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   const snippetRe = /<a[^>]+class=["']result__snippet["'][^>]*>([\s\S]*?)<\/a>/gi;
   const results = [];
   let match;
-  while ((match = linkRe.exec(searchHtml)) && results.length < 4) {
+  const seen = new Set();
+  while ((match = linkRe.exec(searchHtml)) && results.length < 8) {
     let url = htmlDecode(match[1]);
     const title = stripTags(match[2]);
     if (url.includes("uddg=")) {
@@ -163,16 +181,21 @@ async function webResearch(query) {
       } catch (_) {}
     }
     if (!url.startsWith("http")) continue;
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, "");
+      if (seen.has(url) || seen.has(host)) continue;
+      seen.add(url); seen.add(host);
+    } catch (_) { continue; }
     results.push({ title, url, snippet: "" });
   }
   const snippets = [];
-  while ((match = snippetRe.exec(searchHtml)) && snippets.length < 4) snippets.push(stripTags(match[1]));
+  while ((match = snippetRe.exec(searchHtml)) && snippets.length < 8) snippets.push(stripTags(match[1]));
   results.forEach((r, i) => { r.snippet = snippets[i] || ""; });
 
-  const pages = await Promise.all(results.slice(0, 3).map(async r => {
+  const pages = await Promise.all(results.slice(0, 6).map(async r => {
     try {
       const html = await fetchText(r.url);
-      return { ...r, page: stripTags(html).slice(0, 6500) };
+      return { ...r, page: stripTags(html).slice(0, 9000) };
     } catch (_) {
       return { ...r, page: "" };
     }
