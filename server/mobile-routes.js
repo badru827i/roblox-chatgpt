@@ -332,6 +332,53 @@ module.exports = function registerMobileRoutes(app) {
     }
   });
 
+  app.post("/mobile/generate-image", rateLimitMobile, async (req, res) => {
+    try {
+      const owner = deviceId(req);
+      if (!owner) return res.status(400).json({ error: "X-Device-Id diperlukan." });
+
+      const prompt = typeof req.body?.prompt === "string" ? req.body.prompt.trim() : "";
+      if (!prompt) return res.status(400).json({ error: "Prompt gambar diperlukan." });
+      if (prompt.length > 4000) return res.status(413).json({ error: "Prompt terlalu panjang." });
+      if (!gemini) return res.status(503).json({ error: "GEMINI_API_KEY belum dikonfigurasi di Railway." });
+
+      const model = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image";
+      const result = await gemini.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+          responseModalities: ["IMAGE"],
+          responseFormat: {
+            image: {
+              aspectRatio: "1:1",
+              imageSize: "1K"
+            }
+          }
+        }
+      });
+
+      const parts = result?.candidates?.[0]?.content?.parts || [];
+      const imagePart = parts.find(part => part?.inlineData?.data);
+      if (!imagePart) {
+        const text = parts.find(part => part?.text)?.text || "Model tidak menghasilkan gambar.";
+        return res.status(502).json({ error: text });
+      }
+
+      const mime = imagePart.inlineData.mimeType || "image/png";
+      const imageDataUrl = "data:" + mime + ";base64," + imagePart.inlineData.data;
+      res.json({
+        ok: true,
+        model,
+        imageUrl: imageDataUrl,
+        imageDataUrl,
+        prompt
+      });
+    } catch (error) {
+      console.error("mobile generate image:", error);
+      res.status(500).json({ error: error?.message || "Image generation gagal." });
+    }
+  });
+
   app.post("/mobile/chat", rateLimitMobile, async (req, res) => {
     try {
       const owner = deviceId(req);
