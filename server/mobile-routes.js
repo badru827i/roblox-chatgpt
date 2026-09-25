@@ -388,6 +388,154 @@ module.exports = function registerMobileRoutes(app) {
   app.post("/api/mobile/generate-image", rateLimitMobile, generateImageHandler);
   app.post("/generate-image", rateLimitMobile, generateImageHandler);
 
+  app.post("/mobile/chat/stream", rateLimitMobile, async (req, res) => {
+    let streamStarted = false;
+    try {
+      const owner = deviceId(req);
+      if (!owner) return res.status(400).json({ error: "X-Device-Id diperlukan." });
+
+      const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+      if (!message) return res.status(400).json({ error: "Mesej diperlukan." });
+      if (message.length > MAX_MESSAGE) return res.status(413).json({ error: "Mesej terlalu panjang." });
+
+      await ensureDb();
+      let chatId = String(req.body?.chatId || "").trim();
+      if (!/^[0-9a-fA-F-]{36}$/.test(chatId)) chatId = crypto.randomUUID();
+
+      const exists = await pool.query(
+        "SELECT id, title FROM mobile_chats WHERE id = $1 AND device_id = $2 LIMIT 1",
+        [chatId, owner]
+      );
+      if (!exists.rows[0]) {
+        await pool.query(
+          "INSERT INTO mobile_chats (id, device_id, title) VALUES ($1, $2, $3)",
+          [chatId, owner, safeTitle(message)]
+        );
+      } else if (!exists.rows[0].title || exists.rows[0].title === "Chat baru") {
+        await pool.query(
+          "UPDATE mobile_chats SET title = $1, updated_at = NOW() WHERE id = $2 AND device_id = $3",
+          [safeTitle(message), chatId, owner]
+        );
+      }
+
+      const before = await pool.query(
+        `SELECT role, content FROM mobile_chat_messages
+         WHERE chat_id = $1 ORDER BY created_at ASC, id ASC`,
+        [chatId]
+      );
+      await pool.query(
+        "INSERT INTO mobile_chat_messages (chat_id, role, content) VALUES ($1, 'user', $2)",
+        [chatId, message]
+      );
+      await pool.query("UPDATE mobile_chats SET updated_at = NOW() WHERE id = $1", [chatId]);
+
+      const history = before.rows.concat([{ role: "user", content: message }])
+        .slice(-Math.min(MAX_HISTORY, 16));
+      const useSearch = req.body?.research === true || req.body?.evidenceFirst === true || needsWeb(message);
+
+      if (!gemini) throw new Error("GEMINI_API_KEY belum dikonfigurasi di Railway.");
+
+      res.status(200);
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      if (typeof res.flushHeaders === "function") res.flushHeaders();
+      streamStarted = true;
+
+      const sendEvent = payload => {
+        try {
+          res.write("data: " + JSON.stringify(payload) + "\n\n");
+        } catch (_) {}
+      };
+
+      sendEvent({ type: "status", message: useSearch ? "Web semak diperlukan…" : "AI streaming bermula…" });
+
+      const contents = history.map(item => ({
+        role: item.role === "assistant" ? "model" : "user",
+        parts: [{ text: String(item.content || "").slice(-6000) }]
+      }));
+      const system = `You are AI Fusion Assistant, a fast and accurate personal chat assistant.
+Understand Bahasa Melayu, English, mixed Malay-English and slang.
+Answer the user's actual request directly and stay on topic.
+Use previous messages as conversation context.
+For factual/current questions, prefer verified evidence over guessing.
+When Google Search grounding is enabled, use it for fresh facts and base claims on retrieved sources.
+Do not invent facts, citations, URLs, or private information.
+Keep answers concise unless the user asks for detail.`;
+      const config = { systemInstruction: system };
+      if (useSearch) config.tools = [{ googleSearch: {} }];
+
+      let lastError = null;
+      let finalText = "";
+      let usedModel = null;
+      let sources = [];
+
+      for (const model of MODELS) {
+        try {
+          usedModel = model;
+          const stream = await gemini.models.generateContentStream({
+            model,
+            contents,
+            config
+          });
+          for await (const chunk of stream) {
+            const delta = chunk?.text || "";
+            if (delta) {
+              finalText += delta;
+              sendEvent({ type: "delta", text: delta });
+            }
+            const found = extractGoogleSources(chunk);
+            if (found.length) sources = found;
+          }
+          if (finalText.trim()) break;
+        } catch (error) {
+          lastError = error;
+          const msg = String(error?.message || error || "");
+          const transient = /\\b(429|500|502|503|504)\\b|UNAVAILABLE|high demand|overloaded|temporar/i.test(msg);
+          if (!transient) break;
+        }
+      }
+
+      if (!finalText.trim()) {
+        const error = new Error("AI sementara sibuk. Cuba lagi sebentar.");
+        error.code = "AI_UNAVAILABLE";
+        error.retryable = true;
+        error.cause = lastError;
+        throw error;
+      }
+
+      const reply = finalText.trim();
+      await pool.query(
+        "INSERT INTO mobile_chat_messages (chat_id, role, content) VALUES ($1, 'assistant', $2)",
+        [chatId, reply]
+      );
+      await pool.query("UPDATE mobile_chats SET updated_at = NOW() WHERE id = $1", [chatId]);
+
+      sendEvent({
+        type: "done",
+        chatId,
+        model: usedModel,
+        webUsed: sources.length > 0 || useSearch,
+        sources: sources.slice(0, 8)
+      });
+      res.end();
+    } catch (error) {
+      console.error("mobile chat stream:", error);
+      const payload = {
+        type: "error",
+        message: error?.message || "AI server error.",
+        code: error?.code || "AI_SERVER_ERROR",
+        retryable: Boolean(error?.retryable)
+      };
+      if (streamStarted) {
+        try { res.write("data: " + JSON.stringify(payload) + "\n\n"); res.end(); } catch (_) {}
+      } else {
+        res.status(error?.code === "AI_UNAVAILABLE" ? 503 : 500).json(payload);
+      }
+    }
+  });
+
   app.post("/mobile/chat", rateLimitMobile, async (req, res) => {
     try {
       const owner = deviceId(req);
