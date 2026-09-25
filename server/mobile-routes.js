@@ -686,7 +686,8 @@ User instruction: ${message}`;
 
       const history = before.rows.concat([{ role: "user", content: message }])
         .slice(-Math.min(MAX_HISTORY, 16));
-      const useSearch = req.body?.research === true || req.body?.evidenceFirst === true || needsWeb(message);\n      const skill = detectSkill(message);
+      const useSearch = req.body?.research === true || req.body?.evidenceFirst === true || needsWeb(message);
+      const skill = detectSkill(message);
       const imageIntent = imageGenerationIntent(message);
       const currentFormat = requestedImageFormat(message);
       const previousUserMessages = before.rows.filter(item => item.role === "user").map(item => item.content);
@@ -744,7 +745,8 @@ User instruction: ${message}`;
         }
       }
 
-      sendEvent({ type: "skill", skill, status: "selected" });\n      sendEvent({ type: "status", message: useSearch ? "Web semak diperlukan…" : "AI streaming bermula…" });
+      sendEvent({ type: "skill", skill, status: "selected" });
+      sendEvent({ type: "status", message: useSearch ? "Web semak diperlukan…" : "AI streaming bermula…" });
 
       const contents = history.map(item => ({
         role: item.role === "assistant" ? "model" : "user",
@@ -754,6 +756,7 @@ User instruction: ${message}`;
 Understand Bahasa Melayu, English, mixed Malay-English and slang.
 Answer the user's actual request directly and stay on topic.
 Use previous messages as conversation context.
+${skillInstruction(skill)}
 For factual/current questions, prefer verified evidence over guessing.
 When Google Search grounding is enabled, use it for fresh facts and base claims on retrieved sources.
 Do not invent facts, citations, URLs, or private information.
