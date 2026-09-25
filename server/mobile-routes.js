@@ -8,7 +8,11 @@ const sharp = require("sharp");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite").split(",").map(s => s.trim()).filter(Boolean);
+const MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite").split(",").map(s => s.trim()).filter(Boolean).slice(0, 5);
+const MAX_RESEARCH_QUERIES = 5;
+const MAX_RESEARCH_RESULTS = 10;
+const MAX_PAGE_TEXT = 6000;
+const MAX_TOTAL_WEB_CONTEXT = 28000;
 const GEMINI_RETRIES = 1;
 const MAX_MESSAGE = 12000;
 const MAX_HISTORY = 16;
@@ -158,79 +162,91 @@ function fetchText(target, redirects = 0) {
   });
 }
 
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function runner() {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      try { results[index] = await worker(items[index], index); } catch (_) { results[index] = null; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  return results;
+}
+
+function compactResearchContext(sources) {
+  let used = 0;
+  const chunks = [];
+  for (let i = 0; i < sources.length; i++) {
+    const s = sources[i];
+    const block = "[SOURCE " + (i + 1) + "] " + String(s.title || "Untitled").slice(0, 180) +
+      "\nURL: " + String(s.url || "") +
+      "\nSNIPPET: " + String(s.snippet || "").slice(0, 700) +
+      "\nCONTENT: " + String(s.page || "").slice(0, MAX_PAGE_TEXT);
+    if (used + block.length > MAX_TOTAL_WEB_CONTEXT) break;
+    chunks.push(block);
+    used += block.length;
+  }
+  return chunks.join("\n\n");
+}
+
 async function webResearch(query) {
   const directUrls = [...String(query || "").matchAll(/https?:\/\/[^\s<>"')]+/gi)]
-    .map(match => match[0].replace(/[.,!?;:]+$/, ""))
-    .filter((url, index, arr) => arr.indexOf(url) === index)
-    .slice(0, 2);
+    .map(m => m[0].replace(/[.,!?;:]+$/, ""))
+    .filter((url, i, a) => a.indexOf(url) === i).slice(0, 2);
 
-  const directPages = await Promise.all(directUrls.map(async url => {
+  const directPages = await mapWithConcurrency(directUrls, 2, async url => {
     try {
       const html = await fetchText(url);
-      return {
-        title: new URL(url).hostname,
-        url,
-        snippet: "Direct page requested by the user.",
-        page: stripTags(html).slice(0, 12000)
-      };
-    } catch (_) {
-      return null;
-    }
-  }));
+      return { title: new URL(url).hostname, url, snippet: "Direct page requested by the user.", page: stripTags(html).slice(0, MAX_PAGE_TEXT) };
+    } catch (_) { return null; }
+  });
 
   const queries = buildSearchQueries(query);
-  const batches = await Promise.all(queries.map(async currentQuery => {
-    try {
-      const encoded = encodeURIComponent(currentQuery);
-      return await fetchText("https://html.duckduckgo.com/html/?q=" + encoded);
-    } catch (_) {
-      return "";
-    }
-  }));
-  const searchHtml = batches.join("\n");
-  const linkRe = /<a[^>]+class=["']result__a["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRe = /<a[^>]+class=["']result__snippet["'][^>]*>([\s\S]*?)<\/a>/gi;
-  const results = [];
-  let match;
+  const batches = await mapWithConcurrency(queries, 3, async currentQuery => {
+    try { return await fetchText("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(currentQuery)); }
+    catch (_) { return ""; }
+  });
+
+  const candidates = [];
   const seen = new Set();
-  while ((match = linkRe.exec(searchHtml)) && results.length < 8) {
-    let url = htmlDecode(match[1]);
-    const title = stripTags(match[2]);
-    if (url.includes("uddg=")) {
+  for (const html of batches) {
+    const linkRe = /<a[^>]+class=["']result__a["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const snippetRe = /<a[^>]+class=["']result__snippet["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const snippets = [];
+    let m;
+    while ((m = snippetRe.exec(html)) && snippets.length < 8) snippets.push(stripTags(m[1]));
+    let si = 0;
+    while ((m = linkRe.exec(html)) && candidates.length < MAX_RESEARCH_RESULTS * 2) {
+      let url = htmlDecode(m[1]);
+      if (url.includes("uddg=")) {
+        try { const u = new URL(url, "https://duckduckgo.com"); url = decodeURIComponent(u.searchParams.get("uddg") || url); } catch (_) {}
+      }
+      if (!url.startsWith("http")) continue;
       try {
-        const u = new URL(url, "https://duckduckgo.com");
-        url = decodeURIComponent(u.searchParams.get("uddg") || url);
-      } catch (_) {}
+        const host = new URL(url).hostname.replace(/^www\./, "");
+        if (seen.has(url) || seen.has(host)) continue;
+        seen.add(url); seen.add(host);
+      } catch (_) { continue; }
+      candidates.push({ title: stripTags(m[2]), url, snippet: snippets[si++] || "" });
     }
-    if (!url.startsWith("http")) continue;
-    try {
-      const host = new URL(url).hostname.replace(/^www\./, "");
-      if (seen.has(url) || seen.has(host)) continue;
-      seen.add(url); seen.add(host);
-    } catch (_) { continue; }
-    results.push({ title, url, snippet: "" });
   }
-  const snippets = [];
-  while ((match = snippetRe.exec(searchHtml)) && snippets.length < 8) snippets.push(stripTags(match[1]));
-  results.forEach((r, i) => { r.snippet = snippets[i] || ""; });
 
-  const pages = await Promise.all(results.slice(0, 6).map(async r => {
-    try {
-      const html = await fetchText(r.url);
-      return { ...r, page: stripTags(html).slice(0, 9000) };
-    } catch (_) {
-      return { ...r, page: "" };
-    }
-  }));
+  const pages = await mapWithConcurrency(candidates.slice(0, MAX_RESEARCH_RESULTS), 3, async r => {
+    try { return { ...r, page: stripTags(await fetchText(r.url)).slice(0, MAX_PAGE_TEXT) }; }
+    catch (_) { return { ...r, page: "" }; }
+  });
 
-  const merged = [...directPages.filter(Boolean), ...pages];
+  const merged = [...directPages.filter(Boolean), ...pages.filter(Boolean)];
   const seenUrls = new Set();
   return merged.filter(r => {
-    if (!r?.title && !r?.page) return false;
-    if (seenUrls.has(r.url)) return false;
+    if (!r?.url || seenUrls.has(r.url)) return false;
     seenUrls.add(r.url);
-    return true;
-  }).slice(0, 8);
+    return Boolean(r.title || r.page || r.snippet);
+  }).slice(0, MAX_RESEARCH_RESULTS);
 }
 
 async function askGemini(history, webContext, useGoogleSearch = false) {
@@ -801,7 +817,7 @@ Keep answers concise unless the user asks for detail.`;
       );
       await pool.query("UPDATE mobile_chats SET updated_at = NOW() WHERE id = $1", [chatId]);
 
-      const history = before.rows.concat([{ role: "user", content: message }]).slice(-MAX_HISTORY);
+      const history = before.rows.concat([{ role: "user", content: message }]).slice(-MAX_HISTORY).map(item => ({ ...item, content: String(item.content || "").slice(-6000) }));
       let webSources = [];
       let webContext = "";
       let googleSources = [];
@@ -817,9 +833,7 @@ Keep answers concise unless the user asks for detail.`;
         console.warn("Google Search grounding failed, using one fallback web lookup:", googleError.message);
         try {
           webSources = await webResearch(message);
-          webContext = webSources.map((s, i) =>
-            "[SOURCE " + (i + 1) + "] " + s.title + "\nURL: " + s.url + "\nSNIPPET: " + s.snippet + "\nCONTENT: " + s.page
-          ).join("\n\n");
+          webContext = compactResearchContext(webSources);
         } catch (fallbackError) {
           console.warn("fallback web research failed:", fallbackError.message);
         }
