@@ -10,13 +10,26 @@ function getDeviceId(request) {
 }
 
 function needsWeb(message) {
-  const q = String(message || "").toLowerCase();
+  const q = String(message || "").toLowerCase().trim();
+  if (!q) return false;
   return [
-    "cari", "carikan", "search", "google", "web", "internet", "terkini",
-    "terbaru", "latest", "today", "hari ini", "sekarang", "harga", "price",
-    "berita", "news", "update", "spesifikasi", "spec", "sumber", "siapa",
-    "berapa", "2026", "malaysia"
-  ].some(term => q.includes(term));
+    "cari", "carikan", "search", "google", "web", "internet", "online",
+    "terkini", "terbaru", "latest", "today", "hari ini", "sekarang",
+    "harga", "price", "berita", "news", "update", "spesifikasi", "spec",
+    "sumber", "siapa", "berapa", "2026", "malaysia", "release", "rujukan"
+  ].some(term => q.includes(term)) ||
+    /\b(vs|versus|bandingkan|compare)\b/.test(q);
+}
+
+function buildSearchQueries(message) {
+  const original = String(message || "").replace(/\s+/g, " ").trim();
+  const q = original.toLowerCase();
+  const queries = [original];
+  if (/\b(harga|price|berapa)\b/.test(q)) queries.push(original + " Malaysia current price");
+  if (/\b(spec|spesifikasi|model|telefon|phone|laptop|gpu|cpu)\b/.test(q)) queries.push(original + " official specifications");
+  if (/\b(latest|terkini|terbaru|sekarang|hari ini|2026)\b/.test(q)) queries.push(original + " latest 2026");
+  if (/\b(cara|macam mana|how|tutorial|fix|baiki)\b/.test(q)) queries.push(original + " official documentation guide");
+  return [...new Set(queries)].slice(0, 4);
 }
 
 function fetchText(target, redirects = 0) {
@@ -86,9 +99,17 @@ function stripTags(value) {
 }
 
 async function webResearch(query) {
-  const searchHtml = await fetchText(
-    "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(String(query || ""))
-  );
+  const queries = buildSearchQueries(query);
+  const batches = await Promise.all(queries.map(async currentQuery => {
+    try {
+      return await fetchText(
+        "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(currentQuery)
+      );
+    } catch (_) {
+      return "";
+    }
+  }));
+  const searchHtml = batches.join("\n");
 
   const linkRe = /<a[^>]+class=["']result__a["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   const snippetRe = /<a[^>]+class=["']result__snippet["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -96,7 +117,8 @@ async function webResearch(query) {
   const results = [];
   let match;
 
-  while ((match = linkRe.exec(searchHtml)) && results.length < 4) {
+  const seen = new Set();
+  while ((match = linkRe.exec(searchHtml)) && results.length < 8) {
     let url = htmlDecode(match[1]);
     const title = stripTags(match[2]);
 
@@ -107,11 +129,18 @@ async function webResearch(query) {
       } catch (_) {}
     }
 
-    if (url.startsWith("http")) results.push({ title, url, snippet: "" });
+    if (url.startsWith("http")) {
+      try {
+        const host = new URL(url).hostname.replace(/^www\./, "");
+        if (seen.has(url) || seen.has(host)) continue;
+        seen.add(url); seen.add(host);
+      } catch (_) { continue; }
+      results.push({ title, url, snippet: "" });
+    }
   }
 
   const snippets = [];
-  while ((match = snippetRe.exec(searchHtml)) && snippets.length < 4) {
+  while ((match = snippetRe.exec(searchHtml)) && snippets.length < 8) {
     snippets.push(stripTags(match[1]));
   }
 
@@ -119,10 +148,10 @@ async function webResearch(query) {
     result.snippet = snippets[index] || "";
   });
 
-  const pages = await Promise.all(results.slice(0, 3).map(async result => {
+  const pages = await Promise.all(results.slice(0, 6).map(async result => {
     try {
       const html = await fetchText(result.url);
-      return { ...result, page: stripTags(html).slice(0, 6500) };
+      return { ...result, page: stripTags(html).slice(0, 9000) };
     } catch (_) {
       return { ...result, page: "" };
     }
