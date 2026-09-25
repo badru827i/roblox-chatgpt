@@ -706,6 +706,9 @@ User instruction: ${message}`;
       if (typeof res.flushHeaders === "function") res.flushHeaders();
       streamStarted = true;
 
+      // Expose the chat id immediately so the client can reconnect/restore a pending response.
+      sendEvent({ type: "chat", chatId });
+
       const sendEvent = payload => {
         try {
           res.write("data: " + JSON.stringify(payload) + "\n\n");
@@ -744,6 +747,14 @@ User instruction: ${message}`;
           return res.end();
         }
       }
+
+      const pendingReplyMarker = "⏳ AI sedang berfikir…";
+      const pendingRow = await pool.query(
+        "INSERT INTO mobile_chat_messages (chat_id, role, content) VALUES ($1, 'assistant', $2) RETURNING id",
+        [chatId, pendingReplyMarker]
+      );
+      const pendingMessageId = pendingRow.rows[0]?.id;
+      await pool.query("UPDATE mobile_chats SET updated_at = NOW() WHERE id = $1", [chatId]);
 
       sendEvent({ type: "skill", skill, status: "selected" });
       sendEvent({ type: "status", message: useSearch ? "Web semak diperlukan…" : "AI streaming bermula…" });
@@ -804,10 +815,17 @@ Keep answers concise unless the user asks for detail.`;
       }
 
       const reply = finalText.trim();
-      await pool.query(
-        "INSERT INTO mobile_chat_messages (chat_id, role, content) VALUES ($1, 'assistant', $2)",
-        [chatId, reply]
-      );
+      if (pendingMessageId) {
+        await pool.query(
+          "UPDATE mobile_chat_messages SET content = $1 WHERE id = $2 AND chat_id = $3",
+          [reply, pendingMessageId, chatId]
+        );
+      } else {
+        await pool.query(
+          "INSERT INTO mobile_chat_messages (chat_id, role, content) VALUES ($1, 'assistant', $2)",
+          [chatId, reply]
+        );
+      }
       await pool.query("UPDATE mobile_chats SET updated_at = NOW() WHERE id = $1", [chatId]);
 
       sendEvent({
