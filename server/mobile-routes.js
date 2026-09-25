@@ -706,14 +706,14 @@ User instruction: ${message}`;
       if (typeof res.flushHeaders === "function") res.flushHeaders();
       streamStarted = true;
 
-      // Expose the chat id immediately so the client can reconnect/restore a pending response.
-      sendEvent({ type: "chat", chatId });
-
       const sendEvent = payload => {
         try {
           res.write("data: " + JSON.stringify(payload) + "\n\n");
         } catch (_) {}
       };
+
+      // Expose the chat id immediately so the client can reconnect/restore a pending response.
+      sendEvent({ type: "chat", chatId });
 
       if (needsImageFormatChoice) {
         const clarification = "Boleh 👍 Sebelum saya generate, nak file gambar jenis apa? **PNG, JPG/JPEG, WebP atau AVIF?**";
