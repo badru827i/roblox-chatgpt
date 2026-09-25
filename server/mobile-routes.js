@@ -372,7 +372,28 @@ module.exports = function registerMobileRoutes(app) {
         }
       }
 
-      const reply = await askGemini(history, webContext);
+      let googleSources = [];
+      let replyResult;
+      try {
+        replyResult = await askGemini(history, webContext, researchRequested || needsWeb(message));
+        googleSources = replyResult.sources || [];
+      } catch (googleError) {
+        if (!(researchRequested || needsWeb(message))) throw googleError;
+        console.warn("Google Search grounding failed, using fallback web research:", googleError.message);
+        if (!webSources.length) {
+          try {
+            webSources = await webResearch(message);
+            webContext = webSources.map((s, i) =>
+              "[SOURCE " + (i + 1) + "] " + s.title + "\nURL: " + s.url + "\nSNIPPET: " + s.snippet + "\nCONTENT: " + s.page
+            ).join("\n\n");
+          } catch (fallbackError) {
+            console.warn("fallback web research failed:", fallbackError.message);
+          }
+        }
+        replyResult = await askGemini(history, webContext, false);
+      }
+
+      const reply = replyResult.text;
 
       await pool.query(
         "INSERT INTO mobile_chat_messages (chat_id, role, content) VALUES ($1, 'assistant', $2)",
@@ -383,8 +404,12 @@ module.exports = function registerMobileRoutes(app) {
       res.json({
         chatId,
         reply,
-        webUsed: webSources.length > 0,
-        sources: webSources.map(s => ({ title: s.title, url: s.url }))
+        webUsed: googleSources.length > 0 || webSources.length > 0,
+        searchProvider: googleSources.length > 0 ? "google" : (webSources.length > 0 ? "fallback" : "none"),
+        sources: [...googleSources, ...webSources]
+          .filter((s, i, arr) => s?.url && arr.findIndex(x => x.url === s.url) === i)
+          .slice(0, 8)
+          .map(s => ({ title: s.title, url: s.url }))
       });
     } catch (error) {
       console.error("mobile chat:", error);
