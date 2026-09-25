@@ -8,9 +8,9 @@ const { URL } = require("url");
 const DATABASE_URL = process.env.DATABASE_URL;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite").split(",").map(s => s.trim()).filter(Boolean);
-const GEMINI_RETRIES = 2;
+const GEMINI_RETRIES = 1;
 const MAX_MESSAGE = 12000;
-const MAX_HISTORY = 30;
+const MAX_HISTORY = 16;
 const rateLimit = new Map();
 
 const pool = DATABASE_URL
@@ -72,17 +72,21 @@ function safeTitle(text) {
 }
 
 function needsWeb(message) {
-  const q = String(message || "").toLowerCase();
-  return [
+  const q = String(message || "").toLowerCase().trim();
+  if (!q) return false;
+  // Web/Google is for explicit search or freshness-sensitive requests.
+  const explicit = [
     "cari", "carikan", "search", "google", "web", "internet", "online",
     "terkini", "terbaru", "latest", "today", "hari ini", "sekarang",
-    "harga", "price", "berita", "news", "update", "spesifikasi", "spec",
-    "sumber", "siapa", "berapa", "bila", "mana", "kenapa", "mengapa",
-    "cara", "tutorial", "review", "perbandingan", "compare", "vs",
-    "lokasi", "alamat", "jadual", "schedule", "cuaca", "weather",
-    "produk", "model", "telefon", "phone", "laptop", "roblox", "malaysia",
-    "2026"
-  ].some(term => q.includes(term));
+    "harga semasa", "harga terkini", "price today", "berita", "news",
+    "update terbaru", "sumber", "link", "rujukan", "release terbaru",
+    "versi terbaru", "spesifikasi terbaru", "jadual hari ini",
+    "cuaca", "weather", "lokasi", "alamat", "2026"
+  ];
+  if (explicit.some(term => q.includes(term))) return true;
+  // Explicit comparison/current-product queries can benefit from live sources.
+  return /\\b(vs|versus|bandingkan|perbandingan|compare)\\b/.test(q) &&
+         /\\b(harga|spec|spesifikasi|telefon|phone|laptop|produk|model)\\b/.test(q);
 }
 
 function htmlDecode(value) {
@@ -177,7 +181,7 @@ async function webResearch(query) {
   return pages.filter(r => r.title || r.page);
 }
 
-async function askGemini(history, webContext) {
+async function askGemini(history, webContext, useGoogleSearch = false) {
   if (!gemini) throw new Error("GEMINI_API_KEY belum dikonfigurasi di Railway.");
 
   const contents = history.slice(-MAX_HISTORY).map(item => ({
@@ -185,38 +189,53 @@ async function askGemini(history, webContext) {
     parts: [{ text: item.content || "" }]
   }));
 
-  const system = `You are AI Fusion Assistant, a capable personal chat assistant.
-Understand Malay (Bahasa Melayu), English, mixed Malay-English, slang, and normal conversational language.
-Answer the user's actual request directly. Keep context from the conversation. For complex questions, reason carefully and explain assumptions when needed.
-When web research is supplied, treat it as source material, synthesize it, and prefer the freshest relevant facts. Mention source names/URLs briefly when useful.
-Do not pretend you accessed private accounts or private user data. Do not invent facts or sources.
-If the user asks for current information and web research is absent, say that current verification is unavailable instead of pretending.
-${webContext ? "\nWEB RESEARCH (public pages):\\n" + webContext : ""}`;
+  const system = `You are AI Fusion Assistant, a fast and accurate personal chat assistant.
+Understand Bahasa Melayu, English, mixed Malay-English and slang.
+Answer the user's actual request directly and stay on topic.
+For factual/current questions, prefer verified evidence over guessing.
+When Google Search grounding is enabled, use it for fresh facts and base claims on the retrieved sources.
+Do not invent facts, citations, URLs, or private information.
+Keep answers concise unless the user asks for detail.
+${webContext ? "\\nWEB RESEARCH (fallback source material):\\n" + webContext : ""}`;
 
   let lastError = null;
   for (const model of MODELS) {
     for (let attempt = 0; attempt <= GEMINI_RETRIES; attempt++) {
       try {
+        const config = { systemInstruction: system };
+        if (useGoogleSearch) config.tools = [{ googleSearch: {} }];
+
         const result = await gemini.models.generateContent({
           model,
           contents,
-          config: { systemInstruction: system }
+          config
         });
-        return result.text || "Tiada jawapan.";
+
+        const sources = extractGoogleSources(result);
+        return { text: result.text || "Tiada jawapan.", sources };
       } catch (error) {
         lastError = error;
         const message = String(error?.message || error || "");
-        const transient = /\b(429|500|502|503|504)\b|UNAVAILABLE|high demand|overloaded|temporar/i.test(message);
+        const transient = /\\b(429|500|502|503|504)\\b|UNAVAILABLE|high demand|overloaded|temporar/i.test(message);
         if (!transient || attempt >= GEMINI_RETRIES) break;
-        await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+        await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
       }
     }
   }
-  const error = new Error("AI sementara sibuk. Semua model Gemini sedang tidak tersedia. Cuba lagi sebentar.");
+
+  const error = new Error("AI sementara sibuk. Cuba lagi sebentar.");
   error.code = "AI_UNAVAILABLE";
   error.retryable = true;
   error.cause = lastError;
   throw error;
+}
+
+function extractGoogleSources(result) {
+  const chunks = result?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+  return chunks
+    .map(chunk => chunk?.web)
+    .filter(web => web?.uri)
+    .map(web => ({ title: web.title || web.uri, url: web.uri }));
 }
 
 function rateLimitMobile(req, res, next) {
@@ -359,36 +378,24 @@ module.exports = function registerMobileRoutes(app) {
       const history = before.rows.concat([{ role: "user", content: message }]).slice(-MAX_HISTORY);
       let webSources = [];
       let webContext = "";
+      let googleSources = [];
+      const useSearch = req.body?.research === true || req.body?.evidenceFirst === true || needsWeb(message);
 
-      const researchRequested = req.body?.research === true || req.body?.evidenceFirst === true;
-      if (researchRequested || needsWeb(message)) {
+      let replyResult;
+      try {
+        // Fast path: one Gemini request with native Google Search grounding.
+        replyResult = await askGemini(history, "", useSearch);
+        googleSources = replyResult.sources || [];
+      } catch (googleError) {
+        if (!useSearch) throw googleError;
+        console.warn("Google Search grounding failed, using one fallback web lookup:", googleError.message);
         try {
           webSources = await webResearch(message);
           webContext = webSources.map((s, i) =>
             "[SOURCE " + (i + 1) + "] " + s.title + "\nURL: " + s.url + "\nSNIPPET: " + s.snippet + "\nCONTENT: " + s.page
           ).join("\n\n");
-        } catch (error) {
-          console.warn("web research failed:", error.message);
-        }
-      }
-
-      let googleSources = [];
-      let replyResult;
-      try {
-        replyResult = await askGemini(history, webContext, researchRequested || needsWeb(message));
-        googleSources = replyResult.sources || [];
-      } catch (googleError) {
-        if (!(researchRequested || needsWeb(message))) throw googleError;
-        console.warn("Google Search grounding failed, using fallback web research:", googleError.message);
-        if (!webSources.length) {
-          try {
-            webSources = await webResearch(message);
-            webContext = webSources.map((s, i) =>
-              "[SOURCE " + (i + 1) + "] " + s.title + "\nURL: " + s.url + "\nSNIPPET: " + s.snippet + "\nCONTENT: " + s.page
-            ).join("\n\n");
-          } catch (fallbackError) {
-            console.warn("fallback web research failed:", fallbackError.message);
-          }
+        } catch (fallbackError) {
+          console.warn("fallback web research failed:", fallbackError.message);
         }
         replyResult = await askGemini(history, webContext, false);
       }
