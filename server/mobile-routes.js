@@ -591,8 +591,8 @@ User instruction: ${message}`;
       const previousUserMessages = before.rows.filter(item => item.role === "user").map(item => item.content);
       const previousImageRequest = [...previousUserMessages].reverse().find(item => imageGenerationIntent(item));
       const formatSelection = currentFormat && previousImageRequest ? currentFormat : null;
-      const shouldGenerateImage = Boolean(formatSelection || (imageIntent && currentFormat));
-      const needsImageFormatChoice = Boolean(imageIntent && !currentFormat && !previousImageRequest);
+      const shouldGenerateImage = Boolean(previousImageRequest && currentFormat);
+      const needsImageFormatChoice = Boolean(imageIntent && !previousImageRequest);
 
       if (!gemini) throw new Error("GEMINI_API_KEY belum dikonfigurasi di Railway.");
 
