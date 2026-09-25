@@ -332,7 +332,7 @@ module.exports = function registerMobileRoutes(app) {
     }
   });
 
-  app.post("/mobile/generate-image", rateLimitMobile, async (req, res) => {
+  const generateImageHandler = async (req, res) => {
     try {
       const owner = deviceId(req);
       if (!owner) return res.status(400).json({ error: "X-Device-Id diperlukan." });
@@ -377,7 +377,16 @@ module.exports = function registerMobileRoutes(app) {
       console.error("mobile generate image:", error);
       res.status(500).json({ error: error?.message || "Image generation gagal." });
     }
+  };
+
+  // Primary endpoint + compatibility aliases so older APKs/proxies do not hit 404.
+  app.get("/mobile/generate-image", (_req, res) => {
+    res.json({ ok: true, method: "POST", endpoint: "/mobile/generate-image" });
   });
+  app.post("/mobile/generate-image", rateLimitMobile, generateImageHandler);
+  app.post("/mobile/generate-image/", rateLimitMobile, generateImageHandler);
+  app.post("/api/mobile/generate-image", rateLimitMobile, generateImageHandler);
+  app.post("/generate-image", rateLimitMobile, generateImageHandler);
 
   app.post("/mobile/chat", rateLimitMobile, async (req, res) => {
     try {
