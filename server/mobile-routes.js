@@ -75,6 +75,8 @@ function safeTitle(text) {
 function needsWeb(message) {
   const q = String(message || "").toLowerCase().trim();
   if (!q) return false;
+  // A direct URL means the user wants the AI to inspect that website/page.
+  if (/https?:\/\/[^\s]+/i.test(message)) return true;
   const explicit = [
     "cari", "carikan", "search", "google", "web", "internet", "online",
     "terkini", "terbaru", "latest", "today", "hari ini", "sekarang",
@@ -157,6 +159,25 @@ function fetchText(target, redirects = 0) {
 }
 
 async function webResearch(query) {
+  const directUrls = [...String(query || "").matchAll(/https?:\/\/[^\s<>"')]+/gi)]
+    .map(match => match[0].replace(/[.,!?;:]+$/, ""))
+    .filter((url, index, arr) => arr.indexOf(url) === index)
+    .slice(0, 2);
+
+  const directPages = await Promise.all(directUrls.map(async url => {
+    try {
+      const html = await fetchText(url);
+      return {
+        title: new URL(url).hostname,
+        url,
+        snippet: "Direct page requested by the user.",
+        page: stripTags(html).slice(0, 12000)
+      };
+    } catch (_) {
+      return null;
+    }
+  }));
+
   const queries = buildSearchQueries(query);
   const batches = await Promise.all(queries.map(async currentQuery => {
     try {
@@ -202,7 +223,14 @@ async function webResearch(query) {
     }
   }));
 
-  return pages.filter(r => r.title || r.page);
+  const merged = [...directPages.filter(Boolean), ...pages];
+  const seenUrls = new Set();
+  return merged.filter(r => {
+    if (!r?.title && !r?.page) return false;
+    if (seenUrls.has(r.url)) return false;
+    seenUrls.add(r.url);
+    return true;
+  }).slice(0, 8);
 }
 
 async function askGemini(history, webContext, useGoogleSearch = false) {
