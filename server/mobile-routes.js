@@ -5,6 +5,7 @@ const http = require("http");
 const { GoogleGenAI } = require("@google/genai");
 const { URL } = require("url");
 const sharp = require("sharp");
+const { optimizeFile, MAX_FILE_BYTES } = require("./file-tools");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -74,6 +75,32 @@ function safeTitle(text) {
   const value = String(text || "").replace(/\s+/g, " ").trim();
   if (!value) return "Chat baru";
   return value.length > 48 ? value.slice(0, 48).trimEnd() + "…" : value;
+}
+
+function detectSkill(message) {
+  const q = String(message || "").toLowerCase().trim();
+  if (!q) return "chat_core";
+  if (/\b(3d|model 3d|obj|stl|gltf|glb|blender|mesh|low poly|3d design|reka bentuk 3d|modelkan)\b/.test(q)) return "3d_design";
+  if (/\b(gambar|image|foto|picture|vision|screenshot|tengok gambar|lihat gambar|analisis gambar)\b/.test(q)) return "vision";
+  if (/\b(generate image|buatkan gambar|hasilkan gambar|jana gambar|lukis|poster|logo|ilustrasi)\b/.test(q)) return "image_generation";
+  if (/\b(convert|compress|compressor|kecilkan|ringankan|optimize|optimise|saiz file|saiz fail|kurangkan saiz|tanpa hilang quality|tanpa hilang kualiti|lossless|webp|avif|png)\b/.test(q)) return "file";
+  if (/\b(kod|code|coding|program|javascript|typescript|java|kotlin|python|html|css|sql|api|debug|bug|repository|repo)\b/.test(q)) return "code";
+  if (/\b(file|fail|dokumen|document|pdf|txt|json|csv|xlsx|docx|baca fail|analisis fail)\b/.test(q)) return "file";
+  if (needsWeb(q)) return "multi_research";
+  return "chat_core";
+}
+
+function skillInstruction(skill) {
+  const instructions = {
+    chat_core: "Route: Chat Core. Answer directly and stay on topic.",
+    multi_research: "Route: Multi-Research. For fresh or evidence-sensitive questions, research multiple independent sources when possible, compare evidence, then synthesize. Do not invent sources.",
+    vision: "Route: Vision. If an image is supplied, inspect only visible evidence and explain uncertainty.",
+    image_generation: "Route: Image Generation. Treat image creation as a separate generation task; do not pretend an image was generated if the image tool fails.",
+    "3d_design": "Route: 3D Design Skill. Design 3D objects/scenes procedurally with dimensions, topology/parts, materials and export format. Prefer lightweight procedural instructions/code over loading a large 3D model into Railway.",
+    code: "Route: Code Skill. Produce practical, runnable code, explain important assumptions, and keep changes focused.",
+    file: "Route: File Skill. Analyze, convert or optimize files. For size reduction without quality/data loss, use lossless methods and clearly report if a smaller file is not guaranteed."
+  };
+  return instructions[skill] || instructions.chat_core;
 }
 
 function needsWeb(message) {
@@ -249,7 +276,7 @@ async function webResearch(query) {
   }).slice(0, MAX_RESEARCH_RESULTS);
 }
 
-async function askGemini(history, webContext, useGoogleSearch = false) {
+async function askGemini(history, webContext, useGoogleSearch = false, skill = "chat_core") {
   if (!gemini) throw new Error("GEMINI_API_KEY belum dikonfigurasi di Railway.");
 
   const contents = history.slice(-MAX_HISTORY).map(item => ({
@@ -260,7 +287,7 @@ async function askGemini(history, webContext, useGoogleSearch = false) {
   const system = `You are AI Fusion Assistant, a fast and accurate personal chat assistant.
 Understand Bahasa Melayu, English, mixed Malay-English and slang.
 Answer the user's actual request directly and stay on topic.
-For factual/current questions, prefer verified evidence over guessing.
+${skillInstruction(skill)}\nFor factual/current questions, prefer verified evidence over guessing.
 When Google Search grounding is enabled, use it for fresh facts and base claims on the retrieved sources.
 Do not invent facts, citations, URLs, or private information.
 Keep answers concise unless the user asks for detail.
@@ -399,6 +426,36 @@ module.exports = function registerMobileRoutes(app) {
       res.status(503).json({ error: error.message || "Chat database belum tersedia." });
     }
   });
+
+  const fileOptimizeHandler = async (req, res) => {
+    try {
+      const owner = deviceId(req);
+      if (!owner) return res.status(400).json({ error: "X-Device-Id diperlukan." });
+      const base64 = typeof req.body?.fileBase64 === "string" ? req.body.fileBase64.trim() : "";
+      const mimeType = typeof req.body?.mimeType === "string" ? req.body.mimeType.trim() : "";
+      const format = typeof req.body?.format === "string" ? req.body.format.trim() : "";
+      if (!base64) return res.status(400).json({ error: "fileBase64 diperlukan." });
+
+      const result = await optimizeFile({ base64, mimeType, format });
+      res.json({
+        ok: true,
+        skill: "file",
+        operation: "lossless_optimize",
+        ...result,
+        dataUrl: "data:" + result.mimeType + ";base64," + result.dataBase64
+      });
+    } catch (error) {
+      console.error("mobile file optimize:", error);
+      res.status(400).json({ error: error?.message || "File optimization gagal.", lossless: true });
+    }
+  };
+
+  app.get("/mobile/file/optimize", (_req, res) => {
+    res.json({ ok: true, method: "POST", endpoint: "/mobile/file/optimize", maxBytes: MAX_FILE_BYTES, lossless: true });
+  });
+  app.post("/mobile/file/optimize", rateLimitMobile, fileOptimizeHandler);
+  app.post("/mobile/file/optimize/", rateLimitMobile, fileOptimizeHandler);
+  app.post("/api/mobile/file/optimize", rateLimitMobile, fileOptimizeHandler);
 
   const imageChatHandler = async (req, res) => {
     try {
@@ -629,7 +686,7 @@ User instruction: ${message}`;
 
       const history = before.rows.concat([{ role: "user", content: message }])
         .slice(-Math.min(MAX_HISTORY, 16));
-      const useSearch = req.body?.research === true || req.body?.evidenceFirst === true || needsWeb(message);
+      const useSearch = req.body?.research === true || req.body?.evidenceFirst === true || needsWeb(message);\n      const skill = detectSkill(message);
       const imageIntent = imageGenerationIntent(message);
       const currentFormat = requestedImageFormat(message);
       const previousUserMessages = before.rows.filter(item => item.role === "user").map(item => item.content);
@@ -687,7 +744,7 @@ User instruction: ${message}`;
         }
       }
 
-      sendEvent({ type: "status", message: useSearch ? "Web semak diperlukan…" : "AI streaming bermula…" });
+      sendEvent({ type: "skill", skill, status: "selected" });\n      sendEvent({ type: "status", message: useSearch ? "Web semak diperlukan…" : "AI streaming bermula…" });
 
       const contents = history.map(item => ({
         role: item.role === "assistant" ? "model" : "user",
@@ -826,7 +883,7 @@ Keep answers concise unless the user asks for detail.`;
       let replyResult;
       try {
         // Fast path: one Gemini request with native Google Search grounding.
-        replyResult = await askGemini(history, "", useSearch);
+        const skill = detectSkill(message);\n        replyResult = await askGemini(history, "", useSearch, skill);
         googleSources = replyResult.sources || [];
       } catch (googleError) {
         if (!useSearch) throw googleError;
@@ -837,7 +894,7 @@ Keep answers concise unless the user asks for detail.`;
         } catch (fallbackError) {
           console.warn("fallback web research failed:", fallbackError.message);
         }
-        replyResult = await askGemini(history, webContext, false);
+        replyResult = await askGemini(history, webContext, false, skill);
       }
 
       const reply = replyResult.text;
