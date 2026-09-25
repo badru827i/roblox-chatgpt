@@ -4,6 +4,7 @@ const https = require("https");
 const http = require("http");
 const { GoogleGenAI } = require("@google/genai");
 const { URL } = require("url");
+const sharp = require("sharp");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -425,6 +426,87 @@ User instruction: ${message}`;
   app.post("/api/mobile/chat/image", rateLimitMobile, imageChatHandler);
   app.post("/chat/image", rateLimitMobile, imageChatHandler);
 
+  const IMAGE_FORMATS = {
+    png: { mime: "image/png", ext: "png" },
+    jpg: { mime: "image/jpeg", ext: "jpg" },
+    jpeg: { mime: "image/jpeg", ext: "jpg" },
+    webp: { mime: "image/webp", ext: "webp" },
+    avif: { mime: "image/avif", ext: "avif" }
+  };
+
+  function normalizeImageFormat(value) {
+    const key = String(value || "").toLowerCase().replace(/^\./, "").trim();
+    return IMAGE_FORMATS[key] ? (key === "jpeg" ? "jpg" : key) : null;
+  }
+
+  function requestedImageFormat(message) {
+    const q = String(message || "").toLowerCase();
+    if (/\b(jpe?g|\.jpe?g)\b/.test(q)) return "jpg";
+    if (/\bwebp\b/.test(q)) return "webp";
+    if (/\bavif\b/.test(q)) return "avif";
+    if (/\bpng\b/.test(q)) return "png";
+    return null;
+  }
+
+  function imageGenerationIntent(message) {
+    const q = String(message || "").toLowerCase().trim();
+    if (!q) return false;
+    if (/\b(cara|macam mana|how|tutorial|buat|edit|ubah|tukar|convert|compress|resize)\b/.test(q) &&
+        /\b(gambar|image|picture|poster|logo|ilustrasi|illustration)\b/.test(q) &&
+        !/\b(buatkan|hasilkan|generate|create|lukis|lukiskan|hasilkanlah|jana)\b/.test(q)) {
+      return false;
+    }
+    return /\b(buatkan|hasilkan|generate|create|lukis|lukiskan|jana|hasilkanlah)\b/.test(q) &&
+      /\b(gambar|image|picture|poster|logo|ilustrasi|illustration|artwork)\b/.test(q);
+  }
+
+  async function generateImageData(prompt, requestedFormat) {
+    if (!gemini) throw new Error("GEMINI_API_KEY belum dikonfigurasi di Railway.");
+    const format = normalizeImageFormat(requestedFormat) || "png";
+    const model = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image";
+    const result = await gemini.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseModalities: ["IMAGE"],
+        responseFormat: {
+          image: {
+            aspectRatio: "1:1",
+            imageSize: "1K"
+          }
+        }
+      }
+    });
+
+    const parts = result?.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find(part => part?.inlineData?.data);
+    if (!imagePart) {
+      const text = parts.find(part => part?.text)?.text || "Model tidak menghasilkan gambar.";
+      throw new Error(text);
+    }
+
+    const inputMime = imagePart.inlineData.mimeType || "image/png";
+    const inputBuffer = Buffer.from(imagePart.inlineData.data, "base64");
+    let outputBuffer = inputBuffer;
+    let outputMime = inputMime;
+
+    if (format !== "png" || !/^image\/png$/i.test(inputMime)) {
+      const pipeline = sharp(inputBuffer);
+      if (format === "jpg") outputBuffer = await pipeline.jpeg({ quality: 92, mozjpeg: true }).toBuffer();
+      else if (format === "webp") outputBuffer = await pipeline.webp({ quality: 92 }).toBuffer();
+      else if (format === "avif") outputBuffer = await pipeline.avif({ quality: 85 }).toBuffer();
+      else outputBuffer = await pipeline.png().toBuffer();
+      outputMime = IMAGE_FORMATS[format].mime;
+    }
+
+    return {
+      model,
+      format,
+      mime: outputMime,
+      imageDataUrl: "data:" + outputMime + ";base64," + outputBuffer.toString("base64")
+    };
+  }
+
   const generateImageHandler = async (req, res) => {
     try {
       const owner = deviceId(req);
@@ -433,37 +515,15 @@ User instruction: ${message}`;
       const prompt = typeof req.body?.prompt === "string" ? req.body.prompt.trim() : "";
       if (!prompt) return res.status(400).json({ error: "Prompt gambar diperlukan." });
       if (prompt.length > 4000) return res.status(413).json({ error: "Prompt terlalu panjang." });
-      if (!gemini) return res.status(503).json({ error: "GEMINI_API_KEY belum dikonfigurasi di Railway." });
+      const format = normalizeImageFormat(req.body?.format) || "png";
+      const image = await generateImageData(prompt, format);
 
-      const model = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image";
-      const result = await gemini.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseModalities: ["IMAGE"],
-          responseFormat: {
-            image: {
-              aspectRatio: "1:1",
-              imageSize: "1K"
-            }
-          }
-        }
-      });
-
-      const parts = result?.candidates?.[0]?.content?.parts || [];
-      const imagePart = parts.find(part => part?.inlineData?.data);
-      if (!imagePart) {
-        const text = parts.find(part => part?.text)?.text || "Model tidak menghasilkan gambar.";
-        return res.status(502).json({ error: text });
-      }
-
-      const mime = imagePart.inlineData.mimeType || "image/png";
-      const imageDataUrl = "data:" + mime + ";base64," + imagePart.inlineData.data;
       res.json({
         ok: true,
-        model,
-        imageUrl: imageDataUrl,
-        imageDataUrl,
+        model: image.model,
+        format: image.format,
+        imageUrl: image.imageDataUrl,
+        imageDataUrl: image.imageDataUrl,
         prompt
       });
     } catch (error) {
@@ -526,6 +586,13 @@ User instruction: ${message}`;
       const history = before.rows.concat([{ role: "user", content: message }])
         .slice(-Math.min(MAX_HISTORY, 16));
       const useSearch = req.body?.research === true || req.body?.evidenceFirst === true || needsWeb(message);
+      const imageIntent = imageGenerationIntent(message);
+      const currentFormat = requestedImageFormat(message);
+      const previousUserMessages = before.rows.filter(item => item.role === "user").map(item => item.content);
+      const previousImageRequest = [...previousUserMessages].reverse().find(item => imageGenerationIntent(item));
+      const formatSelection = currentFormat && previousImageRequest ? currentFormat : null;
+      const shouldGenerateImage = Boolean(formatSelection || (imageIntent && currentFormat));
+      const needsImageFormatChoice = Boolean(imageIntent && !currentFormat && !previousImageRequest);
 
       if (!gemini) throw new Error("GEMINI_API_KEY belum dikonfigurasi di Railway.");
 
@@ -542,6 +609,39 @@ User instruction: ${message}`;
           res.write("data: " + JSON.stringify(payload) + "\n\n");
         } catch (_) {}
       };
+
+      if (needsImageFormatChoice) {
+        const clarification = "Boleh 👍 Sebelum saya generate, nak file gambar jenis apa? **PNG, JPG/JPEG, WebP atau AVIF?**";
+        await pool.query(
+          "INSERT INTO mobile_chat_messages (chat_id, role, content) VALUES ($1, 'assistant', $2)",
+          [chatId, clarification]
+        );
+        await pool.query("UPDATE mobile_chats SET updated_at = NOW() WHERE id = $1", [chatId]);
+        sendEvent({ type: "skill", skill: "image_generate", status: "needs_format" });
+        sendEvent({ type: "delta", text: clarification });
+        sendEvent({ type: "done", chatId, skill: "image_generate", needsFormat: true, webUsed: false, sources: [] });
+        return res.end();
+      }
+
+      if (shouldGenerateImage) {
+        const generationPrompt = previousImageRequest || message;
+        sendEvent({ type: "skill", skill: "image_generate", status: "generating", format: formatSelection || currentFormat });
+        try {
+          const image = await generateImageData(generationPrompt, formatSelection || currentFormat);
+          await pool.query(
+            "INSERT INTO mobile_chat_messages (chat_id, role, content) VALUES ($1, 'assistant', $2)",
+            [chatId, "[AI Gene " + image.format.toUpperCase() + "] " + image.imageDataUrl]
+          );
+          await pool.query("UPDATE mobile_chats SET updated_at = NOW() WHERE id = $1", [chatId]);
+          sendEvent({ type: "image", format: image.format, mime: image.mime, imageDataUrl: image.imageDataUrl });
+          sendEvent({ type: "done", chatId, skill: "image_generate", format: image.format, webUsed: false, sources: [] });
+          return res.end();
+        } catch (imageError) {
+          console.error("skill image generation:", imageError);
+          sendEvent({ type: "error", message: imageError?.message || "Image generation gagal.", code: "IMAGE_GENERATION_ERROR", retryable: true });
+          return res.end();
+        }
+      }
 
       sendEvent({ type: "status", message: useSearch ? "Web semak diperlukan…" : "AI streaming bermula…" });
 
