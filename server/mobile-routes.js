@@ -521,6 +521,79 @@ User instruction: ${message}`;
     }
   };
 
+  const multiFileChatHandler = async (req, res) => {
+    try {
+      const owner = deviceId(req);
+      if (!owner) return res.status(400).json({ error: "X-Device-Id diperlukan." });
+      if (!gemini) return res.status(503).json({ error: "GEMINI_API_KEY belum dikonfigurasi di Railway." });
+
+      const message = typeof req.body?.message === "string"
+        ? req.body.message.trim()
+        : "Analisis semua fail yang dilampirkan dan jawab soalan pengguna.";
+      const files = Array.isArray(req.body?.files) ? req.body.files.slice(0, 6) : [];
+      if (!files.length) return res.status(400).json({ error: "Sekurang-kurangnya satu fail diperlukan." });
+
+      const MAX_ONE = 8 * 1024 * 1024;
+      const MAX_TOTAL = 24 * 1024 * 1024;
+      let totalBytes = 0;
+      const parts = [{
+        text:
+          "You are AI Fusion Multi-File Assistant.\n" +
+          "Understand Bahasa Melayu, English, mixed Malay-English and slang.\n" +
+          "Analyze every supplied file that the model can read. Keep evidence separated by filename.\n" +
+          "Do not invent content that is not present. If a format is unsupported, say so clearly.\n" +
+          "User instruction: " + message
+      }];
+
+      for (let i = 0; i < files.length; i++) {
+        const item = files[i] || {};
+        const mimeType = String(item.mimeType || "application/octet-stream").toLowerCase().split(";")[0].trim();
+        const name = String(item.name || ("file-" + (i + 1))).slice(0, 180);
+        const data = typeof item.base64 === "string" ? item.base64.replace(/^data:[^,]+,/, "").trim() : "";
+        if (!data) continue;
+        const bytes = Math.floor(data.length * 0.75);
+        if (bytes > MAX_ONE) return res.status(413).json({ error: name + " terlalu besar. Maksimum 8 MB setiap fail." });
+        totalBytes += bytes;
+        if (totalBytes > MAX_TOTAL) return res.status(413).json({ error: "Jumlah fail terlalu besar. Maksimum 24 MB setiap request." });
+
+        parts.push({ text: "\n\n[FILE " + (i + 1) + ": " + name + "]\nMIME: " + mimeType });
+        parts.push({ inlineData: { mimeType, data } });
+      }
+
+      if (parts.length <= 1) return res.status(400).json({ error: "Fail tidak mengandungi data yang boleh dibaca." });
+
+      let lastError = null;
+      for (const model of MODELS) {
+        try {
+          const result = await gemini.models.generateContent({
+            model,
+            contents: [{ role: "user", parts }],
+            config: {
+              systemInstruction:
+                "You are a careful multimodal file analyst. Compare and synthesize evidence across all attached files. " +
+                "For PDFs/documents, use both text and visual structure when available. Return a useful answer in the user's language."
+            }
+          });
+          const reply = String(result?.text || "").trim();
+          if (reply) return res.json({ ok: true, reply, model, fileCount: files.length });
+        } catch (error) {
+          lastError = error;
+          const msg = String(error?.message || error || "");
+          const transient = /\\b(429|500|502|503|504)\\b|UNAVAILABLE|overloaded|temporar/i.test(msg);
+          if (!transient) break;
+        }
+      }
+      throw lastError || new Error("Model multi-file tidak menghasilkan jawapan.");
+    } catch (error) {
+      console.error("mobile multi-file chat:", error);
+      res.status(500).json({ error: error?.message || "Multi-file analysis gagal." });
+    }
+  };
+
+  app.post("/mobile/chat/files", rateLimitMobile, multiFileChatHandler);
+  app.post("/mobile/chat/files/", rateLimitMobile, multiFileChatHandler);
+  app.post("/api/mobile/chat/files", rateLimitMobile, multiFileChatHandler);
+
   // Multimodal image understanding endpoint + aliases for older APKs/proxies.
   app.post("/mobile/chat/image", rateLimitMobile, imageChatHandler);
   app.post("/mobile/chat/image/", rateLimitMobile, imageChatHandler);
