@@ -18,6 +18,41 @@ const GEMINI_RETRIES = 1;
 const MAX_MESSAGE = 12000;
 const MAX_HISTORY = 16;
 const rateLimit = new Map();
+// Railway production is currently provisioned with 2 vCPU / ~1 GB RAM.
+// Bound concurrent Gemini work so bursts do not exhaust the instance or stall
+// WebSocket/SSE connections. Requests wait briefly, then receive a retryable 429.
+const AI_MAX_CONCURRENCY = Math.max(1, Math.min(2, Number(process.env.AI_MAX_CONCURRENCY || 2)));
+const AI_QUEUE_LIMIT = Math.max(2, Number(process.env.AI_QUEUE_LIMIT || 8));
+let aiActive = 0;
+const aiWaiters = [];
+
+function acquireAiSlot(timeoutMs = 2500) {
+  if (aiActive < AI_MAX_CONCURRENCY) {
+    aiActive++;
+    return Promise.resolve(true);
+  }
+  if (aiWaiters.length >= AI_QUEUE_LIMIT) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const waiter = { resolve, timer: null };
+    waiter.timer = setTimeout(() => {
+      const index = aiWaiters.indexOf(waiter);
+      if (index >= 0) aiWaiters.splice(index, 1);
+      resolve(false);
+    }, timeoutMs);
+    aiWaiters.push(waiter);
+  });
+}
+
+function releaseAiSlot() {
+  const next = aiWaiters.shift();
+  if (next) {
+    clearTimeout(next.timer);
+    aiActive++;
+    next.resolve(true);
+  } else {
+    aiActive = Math.max(0, aiActive - 1);
+  }
+}
 
 const pool = DATABASE_URL
   ? new (require("pg").Pool)({
