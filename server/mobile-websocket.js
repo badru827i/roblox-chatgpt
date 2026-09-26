@@ -16,7 +16,8 @@ function needsWeb(message) {
     "cari", "carikan", "search", "google", "web", "internet", "online",
     "terkini", "terbaru", "latest", "today", "hari ini", "sekarang",
     "harga", "price", "berita", "news", "update", "spesifikasi", "spec",
-    "sumber", "siapa", "berapa", "2026", "malaysia", "release", "rujukan"
+    "sumber", "siapa", "berapa", "2026", "malaysia", "release", "rujukan",
+    "current", "semasa", "manufacturer", "official", "datasheet"
   ].some(term => q.includes(term)) ||
     /\b(vs|versus|bandingkan|compare)\b/.test(q);
 }
@@ -29,7 +30,11 @@ function buildSearchQueries(message) {
   if (/\b(spec|spesifikasi|model|telefon|phone|laptop|gpu|cpu)\b/.test(q)) queries.push(original + " official specifications");
   if (/\b(latest|terkini|terbaru|sekarang|hari ini|2026)\b/.test(q)) queries.push(original + " latest 2026");
   if (/\b(cara|macam mana|how|tutorial|fix|baiki)\b/.test(q)) queries.push(original + " official documentation guide");
-  return [...new Set(queries)].slice(0, 4);
+  if (/\b(berita|news|release|update)\b/.test(q)) queries.push(original + " latest news source");
+  if (/\b(harga|price|produk|telefon|phone|laptop)\b/.test(q)) queries.push(original + " current Malaysia");
+  if (/\b(spesifikasi|spec|cpu|gpu|model)\b/.test(q)) queries.push(original + " manufacturer datasheet");
+  if (/\b(terkini|terbaru|latest|sekarang|hari ini|2026)\b/.test(q)) queries.push(original + " current official");
+  return [...new Set(queries)].slice(0, 8);
 }
 
 function fetchText(target, redirects = 0) {
