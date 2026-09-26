@@ -18,11 +18,10 @@ const GEMINI_RETRIES = 1;
 const MAX_MESSAGE = 12000;
 const MAX_HISTORY = 16;
 const rateLimit = new Map();
-// Railway production is currently provisioned with 2 vCPU / ~1 GB RAM.
-// Bound concurrent Gemini work so bursts do not exhaust the instance or stall
-// WebSocket/SSE connections. Requests wait briefly, then receive a retryable 429.
-const AI_MAX_CONCURRENCY = Math.max(1, Math.min(2, Number(process.env.AI_MAX_CONCURRENCY || 2)));
-const AI_QUEUE_LIMIT = Math.max(2, Number(process.env.AI_QUEUE_LIMIT || 8));
+// Railway Free-safe profile: keep the Node process below the 512 MB service target.
+// AI inference is serialized so concurrent model/search work cannot multiply memory.
+const AI_MAX_CONCURRENCY = 1;
+const AI_QUEUE_LIMIT = Math.max(2, Math.min(4, Number(process.env.AI_QUEUE_LIMIT || 4)));
 let aiActive = 0;
 const aiWaiters = [];
 
@@ -54,10 +53,26 @@ function releaseAiSlot() {
   }
 }
 
+async function runWithAiSlot(worker) {
+  const acquired = await acquireAiSlot();
+  if (!acquired) {
+    const error = new Error("AI server sedang sibuk. Cuba lagi sebentar.");
+    error.code = "AI_BUSY";
+    error.retryable = true;
+    throw error;
+  }
+  try {
+    return await worker();
+  } finally {
+    releaseAiSlot();
+  }
+}
+
 const pool = DATABASE_URL
   ? new (require("pg").Pool)({
       connectionString: DATABASE_URL,
-      max: 5,
+      // Keep the DB pool small on the 512 MB Railway profile.
+      max: 3,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
       ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
@@ -729,7 +744,7 @@ User instruction: ${message}`;
       if (!prompt) return res.status(400).json({ error: "Prompt gambar diperlukan." });
       if (prompt.length > 4000) return res.status(413).json({ error: "Prompt terlalu panjang." });
       const format = normalizeImageFormat(req.body?.format) || "png";
-      const image = await generateImageData(prompt, format);
+      const image = await runWithAiSlot(() => generateImageData(prompt, format));
 
       res.json({
         ok: true,
@@ -895,7 +910,8 @@ Keep answers concise unless the user asks for detail.
 ${context ? "\nWEB RESEARCH (fallback source material):\n" + context : ""}`;
 
       const generateStreaming = async (enableGoogleSearch, context) => {
-        const config = { systemInstruction: makeSystem(context) };
+        return runWithAiSlot(async () => {
+          const config = { systemInstruction: makeSystem(context) };
         if (enableGoogleSearch) config.tools = [{ googleSearch: {} }];
         let localText = "";
         let localSources = [];
@@ -922,7 +938,8 @@ ${context ? "\nWEB RESEARCH (fallback source material):\n" + context : ""}`;
             if (!transient) break;
           }
         }
-        return { text: "", sources: localSources };
+          return { text: "", sources: localSources };
+          });
       };
 
       sendEvent({ type: "status", message: useSearch ? "AI + web sedang disemak…" : "AI streaming bermula…" });
@@ -1046,14 +1063,14 @@ ${context ? "\nWEB RESEARCH (fallback source material):\n" + context : ""}`;
 
       let replyResult;
       try {
-        replyResult = await askGemini(history, "", useSearch, skill);
+        replyResult = await runWithAiSlot(() => askGemini(history, "", useSearch, skill));
         googleSources = replyResult.sources || [];
 
         if (useSearch && googleSources.length === 0) {
           console.log("Google Search returned no grounding sources; using multi-query fallback.");
           webSources = await webResearch(message);
           webContext = compactResearchContext(webSources);
-          if (webContext) replyResult = await askGemini(history, webContext, false, skill);
+          if (webContext) replyResult = await runWithAiSlot(() => askGemini(history, webContext, false, skill));
         }
       } catch (googleError) {
         if (!useSearch) throw googleError;
@@ -1064,7 +1081,7 @@ ${context ? "\nWEB RESEARCH (fallback source material):\n" + context : ""}`;
         } catch (fallbackError) {
           console.warn("fallback web research failed:", fallbackError.message);
         }
-        replyResult = await askGemini(history, webContext, false, skill);
+        replyResult = await runWithAiSlot(() => askGemini(history, webContext, false, skill));
       }
 
       const reply = replyResult.text;
