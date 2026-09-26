@@ -900,11 +900,12 @@ Keep answers concise unless the user asks for detail.`;
       let webContext = "";
       let googleSources = [];
       const useSearch = req.body?.research === true || req.body?.evidenceFirst === true || needsWeb(message);
+      const skill = detectSkill(message);
 
       let replyResult;
       try {
         // Fast path: one Gemini request with native Google Search grounding.
-        const skill = detectSkill(message);\n        replyResult = await askGemini(history, "", useSearch, skill);
+        replyResult = await askGemini(history, "", useSearch, skill);
         googleSources = replyResult.sources || [];
       } catch (googleError) {
         if (!useSearch) throw googleError;
