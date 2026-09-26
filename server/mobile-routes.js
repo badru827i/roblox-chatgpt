@@ -757,6 +757,7 @@ User instruction: ${message}`;
 
   app.post("/mobile/chat/stream", rateLimitMobile, async (req, res) => {
     let streamStarted = false;
+    let releaseSlot = null;
     try {
       const owner = deviceId(req);
       if (!owner) return res.status(400).json({ error: "X-Device-Id diperlukan." });
