@@ -10,8 +10,8 @@ const { optimizeFile, MAX_FILE_BYTES } = require("./file-tools");
 const DATABASE_URL = process.env.DATABASE_URL;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MODELS = (process.env.GEMINI_MODELS || process.env.GEMINI_MODEL || "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite").split(",").map(s => s.trim()).filter(Boolean).slice(0, 5);
-const MAX_RESEARCH_QUERIES = 5;
-const MAX_RESEARCH_RESULTS = 10;
+const MAX_RESEARCH_QUERIES = 8;
+const MAX_RESEARCH_RESULTS = 12;
 const MAX_PAGE_TEXT = 6000;
 const MAX_TOTAL_WEB_CONTEXT = 28000;
 const GEMINI_RETRIES = 1;
@@ -129,7 +129,11 @@ function buildSearchQueries(message) {
   if (/\b(spec|spesifikasi|model|telefon|phone|laptop|gpu|cpu)\b/.test(q)) queries.push(original + " official specifications");
   if (/\b(latest|terkini|terbaru|sekarang|hari ini|2026)\b/.test(q)) queries.push(original + " latest 2026");
   if (/\b(cara|macam mana|how|tutorial|fix|baiki)\b/.test(q)) queries.push(original + " official documentation guide");
-  return [...new Set(queries)].slice(0, 4);
+  if (/\b(berita|news|release|update)\b/.test(q)) queries.push(original + " latest news source");
+  if (/\b(harga|price|produk|telefon|phone|laptop)\b/.test(q)) queries.push(original + " current Malaysia");
+  if (/\b(spesifikasi|spec|cpu|gpu|model)\b/.test(q)) queries.push(original + " manufacturer datasheet");
+  if (/\b(terkini|terbaru|latest|today|hari ini|sekarang|2026)\b/.test(q)) queries.push(original + " current official");
+  return [...new Set(queries)].slice(0, MAX_RESEARCH_QUERIES);
 }
 
 function htmlDecode(value) {
@@ -262,7 +266,7 @@ async function webResearch(query) {
     }
   }
 
-  const pages = await mapWithConcurrency(candidates.slice(0, MAX_RESEARCH_RESULTS), 3, async r => {
+  const pages = await mapWithConcurrency(candidates.slice(0, MAX_RESEARCH_RESULTS), 4, async r => {
     try { return { ...r, page: stripTags(await fetchText(r.url)).slice(0, MAX_PAGE_TEXT) }; }
     catch (_) { return { ...r, page: "" }; }
   });
@@ -836,7 +840,14 @@ User instruction: ${message}`;
         role: item.role === "assistant" ? "model" : "user",
         parts: [{ text: String(item.content || "").slice(-6000) }]
       }));
-      const system = `You are AI Fusion Assistant, a fast and accurate personal chat assistant.
+      let webContext = "";
+      let fallbackSources = [];
+      let lastError = null;
+      let finalText = "";
+      let usedModel = null;
+      let sources = [];
+
+      const makeSystem = context => `You are AI Fusion Assistant, a fast and accurate personal chat assistant.
 Understand Bahasa Melayu, English, mixed Malay-English and slang.
 Answer the user's actual request directly and stay on topic.
 Use previous messages as conversation context.
@@ -844,40 +855,62 @@ ${skillInstruction(skill)}
 For factual/current questions, prefer verified evidence over guessing.
 When Google Search grounding is enabled, use it for fresh facts and base claims on retrieved sources.
 Do not invent facts, citations, URLs, or private information.
-Keep answers concise unless the user asks for detail.`;
-      const config = { systemInstruction: system };
-      if (useSearch) config.tools = [{ googleSearch: {} }];
+Keep answers concise unless the user asks for detail.
+${context ? "\nWEB RESEARCH (fallback source material):\n" + context : ""}`;
 
-      let lastError = null;
-      let finalText = "";
-      let usedModel = null;
-      let sources = [];
+      const generateStreaming = async (enableGoogleSearch, context) => {
+        const config = { systemInstruction: makeSystem(context) };
+        if (enableGoogleSearch) config.tools = [{ googleSearch: {} }];
+        let localText = "";
+        let localSources = [];
 
-      for (const model of MODELS) {
-        try {
-          usedModel = model;
-          const stream = await gemini.models.generateContentStream({
-            model,
-            contents,
-            config
-          });
-          for await (const chunk of stream) {
-            const delta = chunk?.text || "";
-            if (delta) {
-              finalText += delta;
-              sendEvent({ type: "delta", text: delta });
+        for (const model of MODELS) {
+          try {
+            usedModel = model;
+            const stream = await gemini.models.generateContentStream({
+              model,
+              contents,
+              config
+            });
+            for await (const chunk of stream) {
+              const delta = chunk?.text || "";
+              if (delta) localText += delta;
+              const found = extractGoogleSources(chunk);
+              if (found.length) localSources = found;
             }
-            const found = extractGoogleSources(chunk);
-            if (found.length) sources = found;
+            if (localText.trim()) return { text: localText, sources: localSources };
+          } catch (error) {
+            lastError = error;
+            const msg = String(error?.message || error || "");
+            const transient = /\\b(429|500|502|503|504)\\b|UNAVAILABLE|high demand|overloaded|temporar/i.test(msg);
+            if (!transient) break;
           }
-          if (finalText.trim()) break;
-        } catch (error) {
-          lastError = error;
-          const msg = String(error?.message || error || "");
-          const transient = /\\b(429|500|502|503|504)\\b|UNAVAILABLE|high demand|overloaded|temporar/i.test(msg);
-          if (!transient) break;
+        }
+        return { text: "", sources: localSources };
+      };
+
+      sendEvent({ type: "status", message: useSearch ? "AI + web sedang disemak…" : "AI streaming bermula…" });
+      let generated = await generateStreaming(useSearch, "");
+
+      if (useSearch && (!generated.text.trim() || generated.sources.length === 0)) {
+        sendEvent({ type: "status", message: "Google Search kosong/gagal • buat multi-query web fallback…" });
+        try {
+          fallbackSources = await webResearch(message);
+          webContext = compactResearchContext(fallbackSources);
+        } catch (fallbackError) {
+          console.warn("stream fallback web research failed:", fallbackError?.message || fallbackError);
+        }
+
+        if (webContext) {
+          generated = await generateStreaming(false, webContext);
         }
       }
+
+      finalText = generated.text;
+      sources = generated.sources.length ? generated.sources : fallbackSources.map(s => ({
+        title: s.title,
+        url: s.url
+      }));
 
       if (!finalText.trim()) {
         const error = new Error("AI sementara sibuk. Cuba lagi sebentar.");
@@ -977,12 +1010,18 @@ Keep answers concise unless the user asks for detail.`;
 
       let replyResult;
       try {
-        // Fast path: one Gemini request with native Google Search grounding.
         replyResult = await askGemini(history, "", useSearch, skill);
         googleSources = replyResult.sources || [];
+
+        if (useSearch && googleSources.length === 0) {
+          console.log("Google Search returned no grounding sources; using multi-query fallback.");
+          webSources = await webResearch(message);
+          webContext = compactResearchContext(webSources);
+          if (webContext) replyResult = await askGemini(history, webContext, false, skill);
+        }
       } catch (googleError) {
         if (!useSearch) throw googleError;
-        console.warn("Google Search grounding failed, using one fallback web lookup:", googleError.message);
+        console.warn("Google Search grounding failed, using multi-query fallback:", googleError.message);
         try {
           webSources = await webResearch(message);
           webContext = compactResearchContext(webSources);
